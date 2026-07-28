@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小说下载器-元素版
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      5.0
 // @description  适配特定小说网站结构，带状态面板和多种优化
 // @author       You
 // @match        *://*/*
@@ -11,51 +11,49 @@
 
 class NovelDownloader {
   constructor() {
-    // 配置
     this.config = {
-      maxConcurrency: 4,
-      delay: 500,
+      maxConcurrency: 20,
+      delay: 0,
       adaptiveDelay: true,
+      maxDlPerMin: 0,
       chapterList: [],
       resultMap: {},
       isDownloading: false,
       completed: 0,
       cancel: false,
-      retryCount: 3,
+      retryCount: 5,
     };
     
-    // 缓存
     this.cache = new Map();
+    this.shadowRoot = null;
+    this.shadowContainer = null;
     
-    // UI元素
     this.downloadBtn = null;
     this.statusPanel = null;
     this.progressLabel = null;
-    this.progressFill = null;
-    this.cancelButton = null;
+    this.progressCurrent = null;
     this.chapterSelector = null;
     
-    // 网站适配规则
-    this.siteRules = {
-      'default': {
-        chapterSelectors: [
-          '.novel-list a', 
-          '.chapter_list a', 
-          '#list a', 
-          '.menu-list a', 
-          '.detail-page_catalog-item a',
-          '#chapters .novel-list a',  // 新增：#chapters 下的 .novel-list
-        ],
-        titleSelectors: [
-          '.dx-title.detail-page__title', 
-          '.detail-page__title', 
-          '.book-title', 
-          '.novel-title',
-          '.info h1',  // 新增：.info 下的 h1 标签
-        ],
-        contentSelectors: ['#content', '.content', '.novel-content', '#chapter-content'],
+    this.sites = {
+      a: {
+        name: 'a',
+        chapterSelector: 'ul.detail-page__catalog-list a.detail-page__catalog-item',
+        numSelector: '.detail-page__chapter-badge',
+        titleSelector: '.detail-page__chapter-title',
+        titleSelectors: ['.dx-title.detail-page__title', '.detail-page__title'],
+        contentSelectors: ['main.dx-container.app-content', 'div.article'],
+        contentExtractor: 'divLine',
+      },
+      b: {
+        name: 'b',
+        chapterSelector: '#chapters .novel-list a',
+        titleSelector: 'h4',
+        titleSelectors: ['.book-title', 'h1.book-title'],
+        contentSelectors: ['#content'],
+        contentExtractor: 'pTags',
       }
     };
+    this.currentSite = null;
     
     this.init();
   }
@@ -63,144 +61,133 @@ class NovelDownloader {
   init() {
     this.loadProgress();
     this.createUI();
-    console.log("📖 小说下载器v3.0已就绪");
+    console.log("📖 小说下载器v5.0已就绪");
   }
   
   sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
   
-  // 请求HTML（带编码自动检测和请求头伪装）
   async getHtml(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "GET",
         url,
         timeout: 15000,
-        responseType: "blob",
+        overrideMimeType: "text/html;charset=utf-8",
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Referer': window.location.href,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive',
         },
-        onload: (res) => {
-          this.decodeHtml(res.response, resolve, reject);
-        },
+        onload: (res) => resolve(res.responseText),
         onerror: reject,
         ontimeout: reject,
       });
     });
   }
   
-  // 编码自动检测
-  decodeHtml(blob, resolve, reject) {
-    const encodings = ['utf-8', 'gbk', 'gb2312', 'big5', 'gb18030'];
-    let index = 0;
-    
-    const tryDecode = () => {
-      if (index >= encodings.length) {
-        reject(new Error('无法识别编码'));
-        return;
-      }
-      
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = reader.result;
-        if (text.includes('\uFFFD')) {
-          index++;
-          tryDecode();
-        } else {
-          resolve(text);
-        }
-      };
-      reader.onerror = () => {
-        index++;
-        tryDecode();
-      };
-      reader.readAsText(blob, encodings[index]);
-    };
-    
-    tryDecode();
-  }
-  
   parse(html) {
-    return new DOMParser().parseFromString(html, "text/html");
-  }
-  
-  getSiteRule() {
-    const domain = window.location.hostname;
-    for (const [site, rule] of Object.entries(this.siteRules)) {
-      if (domain.includes(site)) return rule;
-    }
-    return this.siteRules['default'];
+    if (!html) return document.implementation.createHTMLDocument();
+    const cleaned = html.replace(/data-novel-info="[^"]*"/g, 'data-novel-info=""');
+    return new DOMParser().parseFromString(cleaned, "text/html");
   }
   
   getContent(doc) {
-    const rule = this.getSiteRule();
-    for (const selector of rule.contentSelectors) {
-      const el = doc.querySelector(selector);
-      if (el) {
-        const ps = el.querySelectorAll("p");
-        if (ps.length) {
-          return Array.from(ps)
-            .map((p) => p.innerText.trim())
-            .filter(Boolean)
-            .join("\n\n");
-        }
-        return el.innerText.trim();
+    if (!this.currentSite || !this.currentSite.contentSelectors) {
+      console.warn('无站点配置或无contentSelectors');
+      return '';
+    }
+    
+    const extractor = this.currentSite.contentExtractor || 'text';
+    console.log(`[正文] 站点:${this.currentSite.name} 提取器:${extractor}`);
+    
+    for (const sel of this.currentSite.contentSelectors) {
+      const el = doc.querySelector(sel);
+      console.log(`[正文] 选择器 "${sel}": ${el ? '命中' : '未命中'}`);
+      if (!el) continue;
+      console.log(`[正文] 容器文本长度: ${(el.textContent || '').trim().length}`);
+      const text = this.extractContent(el, extractor);
+      console.log(`[正文] 提取结果: ${text ? text.length + '字' : '空'}`);
+      if (text && text.length >= 50) return text;
+    }
+    
+    console.warn('[正文] 所有选择器均未提取到有效内容');
+    return '';
+  }
+  
+  extractContent(container, type) {
+    const clone = container.cloneNode(true);
+    clone.querySelectorAll('script,style,noscript,iframe,svg,img,canvas,video,audio,.advertisement,.ad,.ads,.comment,.comments,.review,.recommend,.related,.share,.social,.footer,.header,.sidebar,.navigation,.nav,.menu,.popup,.modal,.dialog').forEach(n => n.remove());
+    
+    if (type === 'divLine') {
+      const lines = clone.querySelectorAll('div.line');
+      console.log(`[divLine] div.line数量: ${lines.length}`);
+      if (lines.length >= 1) {
+        const text = Array.from(lines)
+          .map(d => d.textContent.trim())
+          .filter(Boolean)
+          .join('\n\n');
+        if (text.length > 0) return text;
       }
     }
-    return "";
+    
+    if (type === 'pTags') {
+      const ps = clone.querySelectorAll('p');
+      console.log(`[pTags] p标签数量: ${ps.length}`);
+      if (ps.length > 0) {
+        return Array.from(ps)
+          .map(p => p.textContent.trim())
+          .filter(Boolean)
+          .join('\n\n');
+      }
+    }
+    
+    const fallback = clone.textContent.trim();
+    console.log(`[兜底] 纯文本长度: ${fallback.length}`);
+    return fallback;
   }
   
   clean(t) {
     return t?.replace(/\n{3,}/g, "\n\n").trim() || "";
   }
   
-  // 下载单章（带重试机制和缓存）
   async downloadChapter(task, retry = this.config.retryCount) {
     if (this.config.cancel) return;
     
-    // 使用当前任务总数计算进度
     const totalTasks = this.config.currentTaskCount || this.config.chapterList.length;
     this.updateStatus(`${this.config.completed + 1}/${totalTasks}`);
+    this.updateCurrentChapter(task.title);
     
-    // 检查缓存
     if (this.cache.has(task.url)) {
-      // 使用 globalIndex 存储，保证顺序正确
       this.config.resultMap[task.globalIndex] = this.cache.get(task.url);
       this.config.completed++;
-      console.log(`✅ 缓存完成: ${task.title}`);
       return;
     }
     
     try {
       const html = await this.getHtml(task.url);
+      console.log(`[请求] ${task.title} - HTML长度:${html ? html.length : 0}`);
+      if (html && html.length > 0) {
+        console.log(`[请求] HTML预览: ${html.substring(0, 300)}`);
+      }
       const doc = this.parse(html);
+      this.currentSite = task.site;
       const content = this.clean(this.getContent(doc));
       
       if (content.length < 50) {
-        console.warn(`⚠️ 内容过短: ${task.title} (${content.length} 字符)`);
+        console.warn(`内容过短: ${task.title} (${content.length} 字符)`);
       }
       
       const result = `${task.title}\n\n${content}\n\n`;
-      // 使用 globalIndex 存储，保证顺序正确
       this.config.resultMap[task.globalIndex] = result;
       this.cache.set(task.url, result);
-      console.log(`✅ 完成: ${task.title}`);
       
     } catch (e) {
       if (retry > 0) {
-        console.log(`🔄 重试 ${task.title} (剩余${retry}次)`);
-        await this.sleep(1000);
-        await this.downloadChapter(task, retry - 1);
-        return;
+        await this.sleep(1000 + Math.random() * 1000);
+        return await this.downloadChapter(task, retry - 1);
       }
-      console.error(`❌ 失败: ${task.title} - ${e.message}`);
-      // 使用 globalIndex 存储
+      console.error(`下载失败: ${task.title} - ${e.message}`);
       this.config.resultMap[task.globalIndex] = `${task.title}\n\n下载失败: ${e.message}\n\n`;
     }
     
@@ -208,7 +195,6 @@ class NovelDownloader {
     this.saveProgress();
   }
   
-  // 并发下载（带自适应延迟）
   async startDownload(selectedIndices = null) {
     if (this.config.isDownloading) return;
     
@@ -226,30 +212,55 @@ class NovelDownloader {
     this.config.cancel = false;
     this.config.completed = 0;
     this.config.resultMap = {};
-    this.config.currentTaskCount = tasks.length;  // 保存当前任务数量
+    this.config.currentTaskCount = tasks.length;
     
-    console.log(`🚀 开始下载 ${tasks.length} 个章节...`);
+    const concurrency = this.config.maxConcurrency;
+    const minPerMin = this.config.maxDlPerMin;
+    let dlCount = 0;
+    let index = 0;
+    
+    console.log(`开始下载 ${tasks.length} 个章节，并发 ${Math.abs(concurrency)} 线程...`);
     this.updateStatus(`0/${tasks.length}`);
     
-    let index = 0;
-    const worker = async () => {
+    const scheduleNext = async (waitTime) => {
       while (index < tasks.length && !this.config.cancel) {
-        await this.downloadChapter(tasks[index++]);
-        const delay = this.config.adaptiveDelay ? 
-          this.config.delay + Math.random() * 200 : 
-          this.config.delay;
-        await this.sleep(delay);
+        if (minPerMin > 0) {
+          if (dlCount >= minPerMin) {
+            await this.sleep(60000);
+            dlCount = 0;
+          }
+          dlCount++;
+        }
+        
+        await this.downloadChapter(tasks[index]);
+        index++;
+        
+        if (waitTime > 0) {
+          await this.sleep(waitTime);
+        } else if (this.config.adaptiveDelay && this.config.delay > 0) {
+          const delay = this.config.delay + Math.random() * 200;
+          await this.sleep(delay);
+        }
       }
     };
     
-    await Promise.all(Array(this.config.maxConcurrency).fill(0).map(worker));
+    if (concurrency > 0) {
+      const workers = [];
+      for (let i = 0; i < concurrency && i < tasks.length; i++) {
+        workers.push(scheduleNext(this.config.delay));
+      }
+      await Promise.all(workers);
+    } else {
+      const waitTime = Math.abs(concurrency) * 1000;
+      await scheduleNext(waitTime);
+    }
     
     if (!this.config.cancel) {
       this.saveFile();
       this.clearProgress();
-      console.log("✅ 全部下载完成！");
+      console.log("全部下载完成！");
     } else {
-      console.log("⚠️ 用户取消下载");
+      console.log("用户取消下载");
     }
     
     this.config.isDownloading = false;
@@ -260,12 +271,14 @@ class NovelDownloader {
     let fileName = "未命名小说.txt";
     let novelName = "未命名小说";
     
-    const rule = this.getSiteRule();
+    const site = this.currentSite;
     let novelTitleEl = null;
     
-    for (const selector of rule.titleSelectors) {
-      novelTitleEl = document.querySelector(selector);
-      if (novelTitleEl) break;
+    if (site && site.titleSelectors) {
+      for (const selector of site.titleSelectors) {
+        novelTitleEl = document.querySelector(selector);
+        if (novelTitleEl) break;
+      }
     }
     
     const titleMatch = document.querySelector("title");
@@ -286,8 +299,6 @@ class NovelDownloader {
     
     let txt = `${novelName}\n\n`;
     
-    // 按 globalIndex 顺序输出，保证章节顺序正确
-    // 只输出有内容的章节（支持部分章节下载）
     Object.keys(this.config.resultMap)
       .map(Number)
       .sort((a, b) => a - b)
@@ -318,119 +329,296 @@ class NovelDownloader {
     console.log(`✅ 文件已保存: ${fileName}`);
   }
   
-  // 从URL中提取章节序号
-  extractChapterNumber(url) {
-    // 匹配常见的URL模式：
-    // /chapter/123/456.html → 456
-    // /c/123.html → 123
-    // /123.html → 123
-    // chapter_123.html → 123
-    
-    const patterns = [
-      /chapter\/\d+\/(\d+)(?:\.html)?/,   // /chapter/123/456.html
-      /\/c\/(\d+)(?:\.html)?/,             // /c/123.html
-      /\/(\d+)(?:\.html)?$/,               // /123.html
-      /chapter[_-](\d+)/i,                 // chapter_123 或 chapter-123
-      /(\d+)(?:\.html)?$/,                 // 123.html
-    ];
-    
-    for (const pattern of patterns) {
-      const match = url.match(pattern);
-      if (match) return parseInt(match[1], 10);
-    }
-    return null;
-  }
-  
   scanChapters() {
     this.config.chapterList = [];
-    const rule = this.getSiteRule();
+    this.currentSite = null;
     
-    const selector = rule.chapterSelectors.join(', ');
-    const chapterLinks = document.querySelectorAll(selector);
-    
-    let idx = 0;
-    chapterLinks.forEach((a) => {
-      let titleElement = a.querySelector("h4");
-      if (!titleElement) titleElement = a.querySelector(".detail-page-chapter-title");
-      if (!titleElement) titleElement = a.querySelector("span");
-      if (!titleElement) titleElement = a.querySelector("div");
-      if (!titleElement) titleElement = a;
-      
-      if (titleElement) {
-        const title = titleElement.textContent.trim();
-        if (title.length > 0) {
-          // 从URL提取序号
-          const chapterNum = this.extractChapterNumber(a.href);
-          
-          this.config.chapterList.push({
-            idx: idx++,
-            title: title,
-            url: a.href,
-            chapterNum: chapterNum,  // 新增：URL中的章节序号
-            globalIndex: 0,          // 新增：全局排序索引
-          });
-        }
+    const sites = [this.sites.a, this.sites.b];
+    for (const site of sites) {
+      const links = document.querySelectorAll(site.chapterSelector);
+      if (links.length > 0) {
+        this.currentSite = site;
+        console.log(`📋 匹配: ${site.name} (${links.length} 章)`);
+        this.scanChaptersBySite(links, site);
+        return;
+      }
+    }
+    this.showNotice("未检测到章节链接，请确保当前页面是目录页");
+  }
+  
+  scanChaptersBySite(links, site) {
+    links.forEach((el, idx) => {
+      let title = '';
+      if (site.numSelector) {
+        const numEl = el.querySelector(site.numSelector);
+        const titleEl = el.querySelector(site.titleSelector);
+        const num = numEl ? numEl.textContent.trim() : '';
+        const titleText = titleEl ? titleEl.textContent.trim() : '';
+        title = [num, titleText].filter(Boolean).join(' ');
+      } else {
+        const titleEl = el.querySelector(site.titleSelector);
+        title = titleEl ? titleEl.textContent.trim() : el.textContent.trim();
+      }
+      if (title) {
+        this.config.chapterList.push({ idx, title, url: el.href, globalIndex: idx, site });
       }
     });
-    
-    // 去重
+    this.finalizeChapters(site.name);
+  }
+  
+  finalizeChapters(siteName) {
     const seenUrls = new Set();
     this.config.chapterList = this.config.chapterList.filter((item) => {
       if (seenUrls.has(item.url)) return false;
       seenUrls.add(item.url);
-      return true;
+      return item.title.length >= 2;
     });
     
-    // 关键：按章节序号排序
-    // 优先按URL序号排序，序号缺失时按原始顺序
-    this.config.chapterList.sort((a, b) => {
-      // 都有序号时按序号排序
-      if (a.chapterNum !== null && b.chapterNum !== null) {
-        return a.chapterNum - b.chapterNum;
-      }
-      // 都没有序号时按原始顺序
-      return a.idx - b.idx;
-    });
-    
-    // 分配全局索引（下载时用这个索引存储）
     this.config.chapterList.forEach((item, i) => {
       item.globalIndex = i;
     });
     
-    console.log(`📋 检测到 ${this.config.chapterList.length} 个章节`);
-    if (this.config.chapterList.length > 0) {
-      console.log("前3个章节:", this.config.chapterList.slice(0, 3));
-    }
+    console.log(`📋 ${siteName}: ${this.config.chapterList.length} 章`);
+  }
+  
+  initShadow() {
+    if (this.shadowContainer) return;
+    this.shadowContainer = document.createElement("div");
+    this.shadowContainer.id = "novel-downloader-root";
+    this.shadowContainer.style.cssText = "all: initial; display: block;";
+    this.shadowRoot = this.shadowContainer.attachShadow({ mode: "open" });
+    
+    const style = document.createElement("style");
+    style.textContent = `
+      .nd-btn {
+        position: fixed;
+        right: 20px;
+        top: 50%;
+        z-index: 2147483647;
+        padding: 12px 20px;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: bold;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        transition: all 0.3s ease;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .nd-btn:hover {
+        transform: scale(1.05);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      }
+      .nd-btn:active {
+        transform: scale(0.98);
+      }
+      .nd-panel {
+        position: fixed;
+        right: 20px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 2147483647;
+        width: 280px;
+        padding: 16px;
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        font-size: 13px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #333;
+        box-sizing: border-box;
+      }
+      .nd-panel-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      .nd-panel-title h3 {
+        margin: 0;
+        color: #333;
+        font-size: 15px;
+        font-weight: bold;
+      }
+      .nd-panel-title span {
+        color: #888;
+        font-size: 11px;
+      }
+      .nd-mode-group {
+        margin-bottom: 10px;
+      }
+      .nd-mode-option {
+        display: flex;
+        align-items: center;
+        padding: 6px 8px;
+        background: #f5f5f5;
+        border-radius: 5px;
+        cursor: pointer;
+        margin-bottom: 6px;
+      }
+      .nd-mode-option input[type="radio"] {
+        margin-right: 8px;
+        cursor: pointer;
+      }
+      .nd-range-inputs {
+        display: flex;
+        gap: 6px;
+        padding-left: 24px;
+        align-items: center;
+      }
+      .nd-range-inputs input[type="number"] {
+        width: 70px;
+        padding: 5px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      .nd-range-inputs span {
+        color: #888;
+        font-size: 12px;
+      }
+      .nd-settings {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid #eee;
+      }
+      .nd-settings-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .nd-settings-row label {
+        color: #666;
+        font-size: 12px;
+      }
+      .nd-settings-row input[type="number"] {
+        width: 80px;
+        padding: 4px 6px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 12px;
+        text-align: right;
+      }
+      .nd-settings-tip {
+        color: #999;
+        font-size: 11px;
+        margin-top: 4px;
+      }
+      .nd-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .nd-btn-primary {
+        flex: 2;
+        padding: 10px;
+        background: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: bold;
+      }
+      .nd-btn-primary:hover {
+        background: #45a049;
+      }
+      .nd-btn-secondary {
+        flex: 1;
+        padding: 10px;
+        background: #9E9E9E;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .nd-btn-secondary:hover {
+        background: #757575;
+      }
+      .nd-progress-panel {
+        position: fixed;
+        right: 20px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 2147483647;
+        width: 260px;
+        padding: 18px;
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .nd-progress-title {
+        margin-bottom: 8px;
+        color: #333;
+        font-weight: bold;
+        font-size: 14px;
+      }
+      .nd-progress-text {
+        color: #333;
+        text-align: center;
+        margin-bottom: 8px;
+        font-size: 15px;
+        font-weight: bold;
+      }
+      .nd-progress-current {
+        color: #666;
+        text-align: center;
+        margin-bottom: 15px;
+        font-size: 13px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .nd-btn-cancel {
+        width: 100%;
+        padding: 10px;
+        background-color: #f44336;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .nd-btn-cancel:hover {
+        background-color: #d32f2f;
+      }
+      .nd-notice {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: #f44336;
+        color: white;
+        padding: 12px 24px;
+        border-radius: 8px;
+        z-index: 2147483647;
+        font-size: 14px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        animation: nd-slideDown 0.3s ease;
+      }
+      @keyframes nd-slideDown {
+        from { transform: translateX(-50%) translateY(-20px); opacity: 0; }
+        to { transform: translateX(-50%) translateY(0); opacity: 1; }
+      }
+    `;
+    this.shadowRoot.appendChild(style);
+    document.body.appendChild(this.shadowContainer);
   }
   
   createUI() {
+    this.initShadow();
+    
     this.downloadBtn = document.createElement("button");
-    this.downloadBtn.textContent = "📖 下载小说";
-    this.downloadBtn.style.cssText = `
-      position: fixed;
-      right: 20px;
-      top: 50%;
-      z-index: 999999;
-      padding: 12px 20px;
-      background-color: #4CAF50;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 16px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-      transition: all 0.3s ease;
-    `;
-    
-    this.downloadBtn.onmouseover = () => {
-      this.downloadBtn.style.transform = "scale(1.05)";
-      this.downloadBtn.style.boxShadow = "0 4px 12px rgba(0,0,0,0.3)";
-    };
-    
-    this.downloadBtn.onmouseout = () => {
-      this.downloadBtn.style.transform = "scale(1)";
-      this.downloadBtn.style.boxShadow = "0 2px 8px rgba(0,0,0,0.2)";
-    };
+    this.downloadBtn.className = "nd-btn";
+    this.downloadBtn.textContent = "下载小说";
     
     this.downloadBtn.onclick = () => {
       this.scanChapters();
@@ -441,94 +629,113 @@ class NovelDownloader {
       }
     };
     
-    document.body.appendChild(this.downloadBtn);
+    this.shadowRoot.appendChild(this.downloadBtn);
   }
   
   showChapterSelector() {
     this.downloadBtn.style.display = "none";
+    const total = this.config.chapterList.length;
+    const siteName = this.currentSite ? this.currentSite.name : 'unknown';
     
     this.chapterSelector = document.createElement("div");
-    this.chapterSelector.style.cssText = `
-      position: fixed;
-      right: 20px;
-      top: 50%;
-      transform: translateY(-50%);
-      z-index: 999999;
-      width: 320px;
-      max-height: 60vh;
-      padding: 20px;
-      background-color: white;
-      border: 1px solid #e0e0e0;
-      border-radius: 10px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-      font-size: 14px;
-      line-height: 1.5;
-      overflow: hidden;
-    `;
+    this.chapterSelector.className = "nd-panel";
     
     this.chapterSelector.innerHTML = `
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-        <h3 style="margin: 0; color: #333;">选择章节</h3>
-        <span style="color: #666; font-size: 12px;">共 ${this.config.chapterList.length} 章</span>
+      <div class="nd-panel-title">
+        <h3>下载设置</h3>
+        <span>${siteName} · ${total}章</span>
       </div>
-      <div style="display: flex; gap: 8px; margin-bottom: 15px;">
-        <button id="selectAllBtn" style="flex: 1; padding: 6px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">全选</button>
-        <button id="selectNoneBtn" style="flex: 1; padding: 6px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer;">取消</button>
-        <button id="selectRangeBtn" style="flex: 1; padding: 6px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">范围</button>
+      
+      <div class="nd-mode-group">
+        <label class="nd-mode-option">
+          <input type="radio" name="dlMode" value="all" checked>
+          <span>下载全部（1 - ${total}）</span>
+        </label>
       </div>
-      <div id="chapterListContainer" style="max-height: 300px; overflow-y: auto; margin-bottom: 15px; border: 1px solid #eee; border-radius: 5px; padding: 5px;">
-        ${this.config.chapterList.map((ch, i) => `
-          <label style="display: block; padding: 5px 8px; cursor: pointer; border-radius: 3px; transition: background 0.2s;">
-            <input type="checkbox" checked class="chapter-checkbox" data-idx="${i}">
-            <span style="margin-left: 8px;">${ch.title}</span>
-          </label>
-        `).join('')}
+      
+      <div class="nd-mode-group">
+        <label class="nd-mode-option">
+          <input type="radio" name="dlMode" value="range">
+          <span>自定义范围</span>
+        </label>
+        <div class="nd-range-inputs">
+          <input type="number" id="rangeStart" min="1" max="${total}" value="1">
+          <span>至</span>
+          <input type="number" id="rangeEnd" min="1" max="${total}" value="${total}">
+        </div>
       </div>
-      <div style="display: flex; gap: 10px;">
-        <button id="startDownloadBtn" style="flex: 2; padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px;">开始下载</button>
-        <button id="closeSelectorBtn" style="flex: 1; padding: 10px; background: #9E9E9E; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px;">关闭</button>
+      
+      <div class="nd-mode-group">
+        <label class="nd-mode-option">
+          <input type="radio" name="dlMode" value="firstN">
+          <span>仅下载前 N 章</span>
+        </label>
+        <div class="nd-range-inputs">
+          <span>前</span>
+          <input type="number" id="firstN" min="1" max="${total}" value="10">
+          <span>章</span>
+        </div>
+      </div>
+      
+      <div class="nd-settings">
+        <div class="nd-settings-row">
+          <label>并发线程</label>
+          <input type="number" id="concurrencyInput" min="-20" max="50" value="${this.config.maxConcurrency}">
+        </div>
+        <div class="nd-settings-row">
+          <label>延迟(ms)</label>
+          <input type="number" id="delayInput" min="0" max="5000" value="${this.config.delay}">
+        </div>
+        <div class="nd-settings-row">
+          <label>每分钟限频</label>
+          <input type="number" id="maxPerMinInput" min="0" max="1000" value="${this.config.maxDlPerMin}" placeholder="0不限">
+        </div>
+        <div class="nd-settings-tip">并发为负表示单线程，值越大间隔越长</div>
+      </div>
+      
+      <div class="nd-actions">
+        <button id="startDownloadBtn" class="nd-btn-primary">开始下载</button>
+        <button id="closeSelectorBtn" class="nd-btn-secondary">关闭</button>
       </div>
     `;
     
-    document.body.appendChild(this.chapterSelector);
+    this.shadowRoot.appendChild(this.chapterSelector);
     
-    // 绑定事件
-    document.getElementById('selectAllBtn').onclick = () => {
-      document.querySelectorAll('.chapter-checkbox').forEach(cb => cb.checked = true);
-    };
-    
-    document.getElementById('selectNoneBtn').onclick = () => {
-      document.querySelectorAll('.chapter-checkbox').forEach(cb => cb.checked = false);
-    };
-    
-    document.getElementById('selectRangeBtn').onclick = () => {
-      const start = prompt('起始章节（从0开始）:');
-      const end = prompt('结束章节（不包含）:');
-      if (start !== null && end !== null) {
-        const startIdx = parseInt(start);
-        const endIdx = parseInt(end);
-        document.querySelectorAll('.chapter-checkbox').forEach((cb, i) => {
-          cb.checked = i >= startIdx && i < endIdx;
-        });
+    this.chapterSelector.querySelector('#startDownloadBtn').onclick = () => {
+      const mode = this.chapterSelector.querySelector('input[name="dlMode"]:checked').value;
+      let selectedIndices = [];
+      
+      if (mode === 'all') {
+        selectedIndices = this.config.chapterList.map((_, i) => i);
+      } else if (mode === 'range') {
+        const s = parseInt(this.chapterSelector.querySelector('#rangeStart').value) || 1;
+        const e = parseInt(this.chapterSelector.querySelector('#rangeEnd').value) || total;
+        const startIdx = Math.max(0, s - 1);
+        const endIdx = Math.min(total, e);
+        for (let i = startIdx; i < endIdx; i++) selectedIndices.push(i);
+      } else if (mode === 'firstN') {
+        const n = parseInt(this.chapterSelector.querySelector('#firstN').value) || 10;
+        for (let i = 0; i < Math.min(n, total); i++) selectedIndices.push(i);
       }
-    };
-    
-    document.getElementById('startDownloadBtn').onclick = () => {
-      const selectedIndices = Array.from(document.querySelectorAll('.chapter-checkbox:checked'))
-        .map(cb => parseInt(cb.dataset.idx));
       
       if (selectedIndices.length === 0) {
-        this.showNotice("请至少选择一个章节");
+        this.showNotice("没有选择任何章节");
         return;
       }
+      
+      this.config.maxConcurrency = parseInt(this.chapterSelector.querySelector('#concurrencyInput').value) || 20;
+      this.config.delay = parseInt(this.chapterSelector.querySelector('#delayInput').value) || 0;
+      this.config.maxDlPerMin = parseInt(this.chapterSelector.querySelector('#maxPerMinInput').value) || 0;
       
       this.chapterSelector.remove();
       this.chapterSelector = null;
       this.showStatusPanel();
-      this.startDownload(selectedIndices);
+      setTimeout(() => {
+        this.startDownload(selectedIndices);
+      }, 100);
     };
     
-    document.getElementById('closeSelectorBtn').onclick = () => {
+    this.chapterSelector.querySelector('#closeSelectorBtn').onclick = () => {
       this.chapterSelector.remove();
       this.chapterSelector = null;
       this.downloadBtn.style.display = "block";
@@ -537,41 +744,24 @@ class NovelDownloader {
   
   showStatusPanel() {
     this.statusPanel = document.createElement("div");
-    this.statusPanel.style.cssText = `
-      position: fixed;
-      right: 20px;
-      top: 50%;
-      transform: translateY(-50%);
-      z-index: 999999;
-      width: 250px;
-      padding: 20px;
-      background-color: white;
-      border: 1px solid #e0e0e0;
-      border-radius: 10px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-      font-size: 14px;
-      line-height: 1.5;
-    `;
+    this.statusPanel.className = "nd-progress-panel";
     
-    // 进度条
     this.statusPanel.innerHTML = `
-      <div style="margin-bottom: 10px; color: #333; font-weight: bold;">📥 下载中...</div>
-      <div style="width: 100%; height: 6px; background-color: #eee; border-radius: 3px; overflow: hidden; margin-bottom: 10px;">
-        <div id="progress-fill" style="height: 100%; background: linear-gradient(90deg, #4CAF50, #8BC34A); width: 0%; transition: width 0.3s ease;"></div>
-      </div>
-      <div id="download-progress" style="color: #666; text-align: center; margin-bottom: 15px;">进度：0/0</div>
-      <button id="cancelDownloadBtn" style="width: 100%; padding: 10px; background-color: #f44336; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px;">取消下载</button>
+      <div class="nd-progress-title">下载中...</div>
+      <div id="progressText" class="nd-progress-text">0/0</div>
+      <div id="progressCurrent" class="nd-progress-current">准备开始...</div>
+      <button id="cancelBtn" class="nd-btn-cancel">取消下载</button>
     `;
     
-    this.progressLabel = document.getElementById('download-progress');
-    this.progressFill = document.getElementById('progress-fill');
+    this.shadowRoot.appendChild(this.statusPanel);
     
-    document.getElementById('cancelDownloadBtn').onclick = () => {
+    this.progressLabel = this.statusPanel.querySelector('#progressText');
+    this.progressCurrent = this.statusPanel.querySelector('#progressCurrent');
+    
+    this.statusPanel.querySelector('#cancelBtn').onclick = () => {
       this.config.cancel = true;
-      this.progressLabel.textContent = "正在取消...";
+      this.progressLabel.textContent = "已取消";
     };
-    
-    document.body.appendChild(this.statusPanel);
   }
   
   hideStatusPanel() {
@@ -590,50 +780,26 @@ class NovelDownloader {
   
   updateStatus(progress) {
     if (this.progressLabel) {
-      const [current, total] = progress.split('/').map(Number);
-      const percentage = total > 0 ? Math.round((current / total) * 100) : 0;
-      this.progressLabel.textContent = `进度：${progress} (${percentage}%)`;
-      
-      if (this.progressFill) {
-        this.progressFill.style.width = `${percentage}%`;
-      }
+      this.progressLabel.textContent = progress;
+    }
+  }
+  
+  updateCurrentChapter(title) {
+    if (this.progressCurrent) {
+      this.progressCurrent.textContent = title;
     }
   }
   
   showNotice(message) {
     const notice = document.createElement("div");
-    notice.style.cssText = `
-      position: fixed;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background-color: #f44336;
-      color: white;
-      padding: 12px 24px;
-      border-radius: 8px;
-      z-index: 9999999;
-      font-size: 16px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-      animation: slideDown 0.3s ease;
-    `;
-    
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes slideDown {
-        from { transform: translateX(-50%) translateY(-20px); opacity: 0; }
-        to { transform: translateX(-50%) translateY(0); opacity: 1; }
-      }
-    `;
-    document.head.appendChild(style);
-    
+    notice.className = "nd-notice";
     notice.textContent = message;
-    document.body.appendChild(notice);
+    this.shadowRoot.appendChild(notice);
     
     setTimeout(() => {
       if (notice.parentNode) {
         notice.remove();
       }
-      style.remove();
     }, 3000);
   }
   
