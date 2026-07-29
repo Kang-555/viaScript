@@ -50,7 +50,6 @@
     }
     .imgtool-btn-smart:disabled{opacity:0.5;cursor:not-allowed;}
     .btn-step1-smart{background:#4a90e2;color:#fff;}
-    .btn-step2-smart{background:#9b59b6;color:#fff;}
     .btn-step3-smart{background:#67c23a;color:#fff;}
     #imgCountSmart{
         font-size:8px;
@@ -77,8 +76,8 @@
   let templatePattern = null;  // 分析出的模板规律
   let sampleUrls = [];         // 收集的5个样本URL
   const MAX_CONCUR = 6;
-  const SAMPLE_COUNT = 5;      // 收集样本数量
-  const VERIFY_COUNT = 5;      // 验证数量
+  const SAMPLE_COUNT = 4;      // 收集样本数量
+  const VERIFY_COUNT = 6;      // 验证数量（前4个是已爬取的样本，后2个是验证）
 
   function initUI() {
     if (document.getElementById("imgToolBoxSmart")) return;
@@ -86,14 +85,12 @@
     wrap.id = "imgToolBoxSmart";
     wrap.innerHTML = `
       <button class="imgtool-btn-smart btn-step1-smart" id="step1BtnSmart">分析模板</button>
-      <div id="imgCountSmart">步骤1：分析模板规律</div>
-      <button class="imgtool-btn-smart btn-step2-smart" id="step2BtnSmart" style="display:none;">验证规律</button>
+      <div id="imgCountSmart">步骤1：分析并验证规律</div>
       <input type="number" id="pageInputSmart" placeholder="输入总页数" style="display:none;">
       <button class="imgtool-btn-smart btn-step3-smart" id="step3BtnSmart" style="display:none;">打包下载</button>
     `;
     (document.body || document.documentElement).appendChild(wrap);
     document.getElementById("step1BtnSmart").onclick = analyzeTemplates;
-    document.getElementById("step2BtnSmart").onclick = verifyPattern;
     document.getElementById("step3BtnSmart").onclick = doZip;
     document.getElementById("pageInputSmart").addEventListener("input", onPageInput);
   }
@@ -101,12 +98,11 @@
 
   /**
    * 步骤1：分析模板
-   * 从页面收集5个图片URL样本，分析出页码规律
+   * 从页面收集5个图片URL样本，分析出页码规律，然后自动验证
    */
   async function analyzeTemplates() {
     const countEl = document.getElementById("imgCountSmart");
     const step1Btn = document.getElementById("step1BtnSmart");
-    const step2Btn = document.getElementById("step2BtnSmart");
 
     countEl.innerText = "收集中...";
     step1Btn.disabled = true;
@@ -132,7 +128,9 @@
     }
 
     countEl.innerText = `规律: ${templatePattern.prefix}{页码}${templatePattern.suffix}.${templatePattern.ext}`;
-    step2Btn.style.display = "block";
+
+    // 自动执行验证
+    await verifyPattern();
   }
 
   /**
@@ -260,7 +258,7 @@
    */
   async function verifyPattern() {
     const countEl = document.getElementById("imgCountSmart");
-    const step2Btn = document.getElementById("step2BtnSmart");
+    const step1Btn = document.getElementById("step1BtnSmart");
     const pageInput = document.getElementById("pageInputSmart");
 
     if (!templatePattern) {
@@ -269,7 +267,6 @@
     }
 
     countEl.innerText = "验证中...";
-    step2Btn.disabled = true;
 
     // 生成5个验证URL（从startNum开始）
     const verifyUrls = [];
@@ -288,14 +285,14 @@
       }
     }
 
-    if (successCount >= 3) {
-      // 验证通过
+    if (successCount === VERIFY_COUNT) {
+      // 验证通过（6个必须全部成功）
       countEl.innerText = `验证通过(${successCount}/${VERIFY_COUNT})`;
       pageInput.style.display = "block";
       pageInput.placeholder = `从${templatePattern.startNum}开始，共?页`;
     } else {
-      countEl.innerText = `验证失败(${successCount}/${VERIFY_COUNT})`;
-      step2Btn.disabled = false;
+      countEl.innerText = `验证失败(${successCount}/${VERIFY_COUNT})，请重新分析`;
+      step1Btn.disabled = false;
     }
   }
 
