@@ -232,8 +232,11 @@
         type: "blob",
         compression: "STORE",
       });
-      let name = (document.title || "图片合集").replace(/[\\/:*?"<>|]/g, "");
-      saveAs(zipBlob, name + ".zip");
+      const name = (document.title || "图片合集").replace(
+        /[\\/:*?"<>|]/g,
+        "",
+      );
+      window.saveAs(zipBlob, `${name}.zip`);
       countText.innerText = `完成${successCnt}张`;
     } catch (e) {
       countText.innerText = "打包失败";
