@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小说下载器-合并版
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  融合三站整合版与自动爬取版：目录页批量模式 + 正文页链路模式，统一数据结构与断点续传
 // @author       You
 // @match        *://*/*
@@ -15,8 +15,14 @@
 (function() {
     'use strict';
 
-    const VERSION = '2.2';
+    const VERSION = '2.3';
     const STORAGE_KEY = 'novelDownloaderMerged_progress';
+
+    // 章节标题识别正则（参考怠惰小说下载器，覆盖中英文小说常见命名）
+    const INDEX_REG = /^(\w.*)?PART\b|^Prologue|^(\w.*)?Chapter\s*[\-_]?\d+|分卷|^序$|^序\s*[·言章]|^前\s*言|^附\s*[录錄]|^引\s*[言子]|^摘\s*要|^[楔契]\s*子|^后\s*记|^後\s*記|^附\s*言|^结\s*语|^結\s*語|^尾\s*[声聲]|^最終話|^最终话|^番\s*外|^\d+[\s\.、,，）\-_：:][^\d#\.]|^(\d|\s|\.)*[第（]?\s*[\d〇零一二两三四五六七八九十百千万萬-]+\s*[、）章节節回卷折篇幕集话話]/i;
+
+    // 章节内分页识别正则（"下一页/下一张/next page"）
+    const INNER_NEXT_PAGE_REG = /^\s*(下一[页頁张張]|next\s*page|次のページ)/i;
 
     class NovelDownloaderMerged {
         constructor() {
@@ -405,7 +411,12 @@
                     if (e.message === 'VERIFY_DETECTED') throw e;
                     lastErr = e;
                     console.warn(`[getHtmlWithRetry] 第${i + 1}次失败: ${e.message}, ${url}`);
-                    if (i < retry) await this.sleep(800 + Math.random() * 600);
+                    // 指数退避 + 随机抖动：1s, 2s, 4s, 8s... + 0~500ms 抖动
+                    if (i < retry) {
+                        const baseDelay = Math.min(8000, 1000 * Math.pow(2, i));
+                        const jitter = Math.random() * 500;
+                        await this.sleep(baseDelay + jitter);
+                    }
                 }
             }
             throw lastErr;
@@ -521,14 +532,67 @@
         }
 
         extractAuto(clone, isLiveDom) {
+            // 1. 优先 <p> 标签
             const ps = clone.querySelectorAll('p');
             if (ps.length > 0) {
-                return Array.from(ps)
+                const text = Array.from(ps)
                     .map(p => this.getText(p, isLiveDom).trim())
                     .filter(Boolean)
                     .join('\n\n');
+                if (text.length >= 50) return text;
             }
+            // 2. 最大文本块算法（参考怠惰小说下载器）
+            const largest = this.findLargestTextBlock(clone, isLiveDom);
+            if (largest && largest.text.length >= 50) return largest.text;
+            // 3. 兜底：整个容器文本
             return this.getText(clone, isLiveDom).trim();
+        }
+
+        /**
+         * 最大文本块算法：遍历 span/div/article/p/td/pre
+         * 取直接子文本节点字符数最多的元素作为正文容器
+         * 参考：怠惰小说下载器 getPageContent
+         */
+        findLargestTextBlock(root, isLiveDom) {
+            const candidates = root.querySelectorAll('span,div,article,p,td,pre');
+            let largestEl = null, largestNum = 0;
+            for (let i = 0; i < candidates.length; i++) {
+                const el = candidates[i];
+                // 跳过 footer/导航/广告等
+                if (/footer|header|nav|sidebar|comment|advertis|ad-|menu/i.test(el.className || '')) continue;
+                let curNum = 0;
+                for (let j = 0; j < el.childNodes.length; j++) {
+                    const node = el.childNodes[j];
+                    if (node.nodeType === 3) {
+                        // 文本节点
+                        curNum += (node.data || '').trim().length;
+                    } else if (node.nodeType === 1) {
+                        // 元素节点：p/I/STRONG/B/FONT/DL/DD/H* 计入正文
+                        if (/^(I|A|STRONG|B|FONT|P|DL|DD|H\d)$/.test(node.nodeName)) {
+                            curNum += this.getText(node, isLiveDom).trim().length;
+                        }
+                    }
+                }
+                // 排除疑似目录：5+ 子元素匹配章节标题正则
+                if (el.childNodes.length > 1) {
+                    let indexItem = 0;
+                    for (let j = 0; j < el.childNodes.length; j++) {
+                        const node = el.childNodes[j];
+                        if (node.nodeType === 1) {
+                            const t = this.getText(node, isLiveDom).trim();
+                            if (t && t.length < 50 && INDEX_REG.test(t)) indexItem++;
+                        }
+                    }
+                    if (indexItem >= 5) continue;  // 是目录不是正文
+                }
+                if (curNum > largestNum) {
+                    largestNum = curNum;
+                    largestEl = el;
+                }
+            }
+            if (!largestEl) return null;
+            const text = this.getText(largestEl, isLiveDom).trim();
+            return { el: largestEl, text, length: largestNum };
         }
 
         cleanText(t) {
@@ -874,7 +938,30 @@
             const html = await this.getHtmlWithRetry(url, site);
             const doc = this.parseHtml(html);
             const title = this.getTitle(doc, url);
-            const content = this.cleanText(this.getContent(doc, false));
+            let content = this.cleanText(this.getContent(doc, false));
+
+            // 章节内分页嗅探：若当前页有"下一页"（非"下一章"），拼接后续分页内容
+            let innerNext = this.findInnerNextPage(doc, url);
+            let pageCount = 0;
+            const visitedUrls = new Set([url]);
+            while (innerNext && pageCount < 10) {
+                pageCount++;
+                try {
+                    const nextHtml = await this.getHtmlWithRetry(innerNext, site);
+                    const nextDoc = this.parseHtml(nextHtml);
+                    const nextContent = this.cleanText(this.getContent(nextDoc, false));
+                    if (nextContent && nextContent.length > 0) {
+                        content += '\n\n' + nextContent;
+                    }
+                    visitedUrls.add(innerNext);
+                    innerNext = this.findInnerNextPage(nextDoc, innerNext);
+                    // 防止循环
+                    if (innerNext && visitedUrls.has(innerNext)) break;
+                } catch (e) {
+                    console.warn(`分页抓取失败: ${innerNext} - ${e.message}`);
+                    break;
+                }
+            }
 
             // 静态 HTML 抓不到时，尝试从当前页面 DOM 提取（仅当 URL 匹配当前页）
             if ((!content || content.length < this.config.minTxtLength) &&
@@ -902,6 +989,27 @@
             };
         }
 
+        /**
+         * 嗅探章节内分页（"下一页/下一张"，区别于"下一章"）
+         * 参考：怠惰小说下载器 innerNextPage
+         */
+        findInnerNextPage(doc, baseUrl) {
+            const aTags = doc.querySelectorAll('a');
+            for (let i = 0; i < aTags.length; i++) {
+                const a = aTags[i];
+                if (a.dataset.href && (!a.href || a.href.indexOf('javascript') !== -1)) {
+                    try { a.href = a.dataset.href; } catch (e) {}
+                }
+                if (!a.href || !/^https?:/i.test(a.href)) continue;
+                if (a.href === baseUrl || a.href === location.href) continue;
+                const txt = (a.innerText || a.textContent || '').trim();
+                if (INNER_NEXT_PAGE_REG.test(txt)) {
+                    return a.href;
+                }
+            }
+            return null;
+        }
+
         // ========== 批量模式：目录页扫描 ==========
 
         scanChapters() {
@@ -924,12 +1032,21 @@
                 }
             }
 
-            // 兜底：用通用选择器尝试
+            // 兜底 1：用通用选择器尝试
             const genericLinks = document.querySelectorAll('ul li a, .chapter-list a, .catalog a');
             if (genericLinks.length >= 10) {
                 this.config.currentSite = null;
                 this.scanChaptersBySite(genericLinks, null);
                 return this.config.chapterList.length;
+            }
+
+            // 兜底 2：用 INDEX_REG 正则匹配页面所有 <a>
+            const regLinks = this.scanByIndexReg();
+            if (regLinks.length >= 5) {
+                this.config.currentSite = null;
+                this.config.chapterList = regLinks;
+                console.log(`[scanChapters] 正则匹配兜底: ${regLinks.length} 章`);
+                return regLinks.length;
             }
 
             return 0;
@@ -969,6 +1086,36 @@
             this.config.chapterList.forEach((item, i) => { item.globalIndex = i; });
 
             console.log(`[scanChaptersBySite] ${site ? site.name : '通用'}: ${this.config.chapterList.length} 章`);
+        }
+
+        /**
+         * 用 INDEX_REG 正则补充扫描章节链接
+         * 在通用兜底选择器未命中时，遍历页面所有 <a>，匹配章节标题正则
+         * 参考：怠惰小说下载器 indexReg
+         */
+        scanByIndexReg() {
+            const aEles = document.querySelectorAll('a');
+            const result = [];
+            const seen = new Set();
+            for (let i = 0; i < aEles.length; i++) {
+                const a = aEles[i];
+                // data-href 兜底
+                if (a.dataset.href && (!a.href || a.href.indexOf('javascript') !== -1)) {
+                    try { a.href = a.dataset.href; } catch (e) {}
+                }
+                if (!a.href || !/^https?:/i.test(a.href) || a.href === location.href) continue;
+                if (seen.has(a.href)) continue;
+                const txt = (a.innerText || a.textContent || '').trim();
+                if (!txt || txt.length > 60) continue;  // 章节标题不会太长
+                // 匹配章节标题正则 或 URL 含 chapter-N
+                if (INDEX_REG.test(txt) || /chapter[\-_]?\d/i.test(a.href)) {
+                    result.push({ title: txt, url: a.href, globalIndex: 0 });
+                    seen.add(a.href);
+                }
+            }
+            // 按页内位置排序（DOM 顺序即为此处遍历顺序）
+            result.forEach((item, i) => { item.globalIndex = i; });
+            return result;
         }
 
         // ========== 批量模式：下载 ==========
