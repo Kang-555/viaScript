@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小说下载器-三站整合版
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.2
 // @description  适配三个特定小说网站，支持智能验证码处理和多种下载优化
 // @author       You
 // @match        *://*/*
@@ -80,7 +80,6 @@
             };
             
             this.currentSite = null;
-            this.verifyDetected = false;
             
             this.init();
         }
@@ -152,83 +151,6 @@
             return false;
         }
         
-        async handleVerify(url) {
-            console.log('🔐 检测到验证码，暂停下载...');
-            
-            this.verifyResolve = null;
-            this.verifyReject = null;
-            
-            const verifyTab = window.open(url, '_blank');
-            if (!verifyTab) {
-                this.showNotice('弹窗被拦截，请允许此网站的弹窗功能');
-                throw new Error('弹窗被浏览器拦截');
-            }
-            
-            this.showVerifyButtons();
-            
-            return new Promise((resolve, reject) => {
-                this.verifyResolve = resolve;
-                this.verifyReject = reject;
-                this.verifyUrl = url;
-                this.verifyTab = verifyTab;
-            });
-        }
-        
-        showVerifyButtons() {
-            if (this.verifyBtnContainer) return;
-            
-            this.verifyBtnContainer = document.createElement("div");
-            this.verifyBtnContainer.className = "nd-verify-buttons";
-            this.verifyBtnContainer.innerHTML = `
-                <div class="nd-verify-message">
-                    ⚠️ 已在新标签页打开验证页面<br>
-                    请完成验证后点击下方按钮继续
-                </div>
-                <button class="nd-btn nd-btn-verify-done">✅ 验证完成，继续下载</button>
-            `;
-            
-            this.shadowRoot.appendChild(this.verifyBtnContainer);
-            
-            const doneBtn = this.verifyBtnContainer.querySelector('.nd-btn-verify-done');
-            doneBtn.addEventListener('click', () => {
-                this.onVerifyComplete();
-            });
-        }
-        
-        hideVerifyButtons() {
-            if (this.verifyBtnContainer && this.verifyBtnContainer.parentNode) {
-                this.verifyBtnContainer.parentNode.removeChild(this.verifyBtnContainer);
-                this.verifyBtnContainer = null;
-            }
-        }
-        
-        onVerifyComplete() {
-            console.log('✅ 用户确认验证完成');
-            
-            if (this.verifyTab && !this.verifyTab.closed) {
-                this.verifyTab.close();
-            }
-            
-            this.hideVerifyButtons();
-            
-            if (this.verifyResolve && this.verifyUrl) {
-                const url = this.verifyUrl;
-                const resolve = this.verifyResolve;
-                this.verifyResolve = null;
-                this.verifyReject = null;
-                this.verifyUrl = null;
-                
-                this.getHtml(url, false).then(html => {
-                    resolve(html);
-                }).catch(err => {
-                    if (this.verifyReject) {
-                        this.verifyReject(err);
-                        this.verifyReject = null;
-                    }
-                });
-            }
-        }
-        
         async getHtml(url, checkVerify = true, site = null) {
             const randomDelay = 500 + Math.random() * 1000;
             await this.sleep(randomDelay);
@@ -250,23 +172,13 @@
                         const html = res.responseText;
                         console.log(`[getHtml] 请求返回HTML长度: ${html.length}`);
                         
-                        // 调试：检查HTML是否包含正文关键元素
-                        if (html.includes('chapterContent') || html.includes('content_txt') || html.includes('read-section')) {
-                            console.log(`[getHtml] ✅ HTML包含正文关键元素`);
-                        } else {
-                            console.warn(`[getHtml] ⚠️ HTML中未找到正文关键元素，可能是JS动态渲染`);
-                            // 输出HTML前500字符用于调试
-                            console.log(`[getHtml] HTML预览: ${html.substring(0, 500)}`);
-                        }
-                        
                         if (checkVerify && site && site.hasVerify) {
                             const oldSite = this.currentSite;
                             this.currentSite = site;
                             try {
                                 if (this.detectVerify(html)) {
-                                    const verifiedHtml = await this.handleVerify(url);
                                     this.currentSite = oldSite;
-                                    resolve(verifiedHtml);
+                                    reject(new Error('VERIFY_DETECTED'));
                                     return;
                                 }
                             } catch (e) {
@@ -506,14 +418,11 @@
                 console.log(`[请求] ${task.title} - HTML长度:${html ? html.length : 0}`);
                 
                 const doc = this.parse(html);
-                // 静态HTML使用textContent
                 let content = this.clean(this.getContent(doc, false));
                 
-                // 如果静态请求拿不到正文，且当前页面URL与章节URL相同，尝试从当前页面DOM提取
                 if (!content || content.length < this.config.minTxtLength) {
                     if (window.location.href === task.url || window.location.href.includes(task.url.split('/').pop())) {
                         console.log(`[下载] 静态请求未获取到正文，尝试从当前页面DOM提取`);
-                        // 当前页面DOM使用innerText
                         content = this.clean(this.getContent(document, true));
                         console.log(`[下载] 从当前DOM提取的正文长度: ${content.length}`);
                     }
@@ -528,6 +437,14 @@
                 this.cache.set(task.url, result);
                 
             } catch (e) {
+                if (e.message === 'VERIFY_DETECTED') {
+                    console.warn(`⚠️ 检测到验证码，停止下载: ${task.title}`);
+                    this.config.resultMap[task.globalIndex] = `${task.title}\n\n遇到验证码，下载中断\n\n`;
+                    this.saveProgress();
+                    this.config.cancel = true;
+                    return;
+                }
+                
                 if (retry > 0) {
                     await this.sleep(1000 + Math.random() * 1000);
                     return await this.downloadChapter(task, retry - 1);
@@ -561,75 +478,115 @@
                 return;
             }
 
-            this.config.isDownloading = true;
-            this.config.cancel = false;
-            this.config.completed = 0;
-            this.config.resultMap = {};
-            this.config.currentTaskCount = tasks.length;
-
-            const downloadBtn = this.statusPanel.querySelector(".nd-btn-download");
-            const stopBtn = this.statusPanel.querySelector(".nd-btn-stop");
-            const saveBtn = this.statusPanel.querySelector(".nd-btn-save");
-            
-            if (downloadBtn) downloadBtn.style.display = "none";
-            if (stopBtn) stopBtn.style.display = "block";
-            if (saveBtn) saveBtn.style.display = "none";
-
-            const concurrency = this.config.maxConcurrency;
-            const minPerMin = this.config.maxDlPerMin;
-            let dlCount = 0;
-            let index = 0;
-
-            console.log(`开始下载 ${tasks.length} 个章节，并发 ${Math.abs(concurrency)} 线程...`);
-            this.updateStatus(`0/${tasks.length}`);
-            
-            const scheduleNext = async (waitTime) => {
-                console.log(`[scheduleNext] 启动, waitTime: ${waitTime}`);
-                while (index < tasks.length && !this.config.cancel) {
-                    const currentIndex = index++;
-                    console.log(`[scheduleNext] 处理任务 ${currentIndex + 1}/${tasks.length}: ${tasks[currentIndex].title}`);
-                    
-                    if (minPerMin > 0) {
-                        if (dlCount >= minPerMin) {
-                            console.log('[scheduleNext] 达到每分钟限制，等待60秒');
-                            await this.sleep(60000);
-                            dlCount = 0;
-                        }
-                        dlCount++;
-                    }
-
-                    await this.downloadChapter(tasks[currentIndex]);
-
-                    if (waitTime > 0) {
-                        await this.sleep(waitTime);
-                    } else if (this.config.adaptiveDelay && this.config.delay > 0) {
-                        const delay = this.config.delay + Math.random() * 200;
-                        await this.sleep(delay);
-                    }
-                }
-                console.log(`[scheduleNext] 结束, index: ${index}, cancel: ${this.config.cancel}`);
-            };
-            
-            if (concurrency > 0) {
-                const workers = [];
-                const workerCount = Math.min(concurrency, tasks.length);
-                console.log(`[startDownload] 启动 ${workerCount} 个并发 workers`);
-                
-                for (let i = 0; i < workerCount; i++) {
-                    workers.push(scheduleNext(this.config.delay));
-                }
-                await Promise.all(workers);
-            } else {
-                const waitTime = Math.abs(concurrency) * 1000;
-                console.log(`[startDownload] 单线程模式，间隔 ${waitTime}ms`);
-                await scheduleNext(waitTime);
+            const hasProgress = this.config.completed > 0 && Object.keys(this.config.resultMap).length > 0;
+            if (hasProgress) {
+                const completedCount = this.config.completed;
+                const remainingCount = tasks.length - completedCount;
+                console.log(`📂 检测到下载进度: 已完成${completedCount}章，剩余${remainingCount}章`);
+                this.showNotice(`恢复下载: 已完成${completedCount}章，从第${completedCount + 1}章继续`);
+                tasks = tasks.slice(completedCount);
             }
 
-            console.log(`[startDownload] 下载循环结束，cancel: ${this.config.cancel}, completed: ${this.config.completed}/${tasks.length}`);
+            this.config.isDownloading = true;
+            this.config.cancel = false;
+            if (!hasProgress) {
+                this.config.completed = 0;
+                this.config.resultMap = {};
+            }
+            this.config.currentTaskCount = tasks.length + (hasProgress ? this.config.completed : 0);
+
+            const actionBtn = this.statusPanel.querySelector(".nd-btn-action");
+            const saveBtn = this.statusPanel.querySelector(".nd-btn-save");
+            
+            if (actionBtn) {
+                actionBtn.textContent = "⏹ 停止下载";
+                actionBtn.style.background = "#f44336";
+            }
+            if (saveBtn) saveBtn.style.display = "none";
+
+            const isSiteC = this.currentSite && this.currentSite.hasVerify;
+            const batchSize = isSiteC ? 10 : tasks.length;
+            const pauseTime = isSiteC ? 30000 : 0;
+
+            const totalTaskCount = this.config.currentTaskCount;
+            console.log(`开始下载 ${tasks.length} 个章节，站点C分批模式: ${isSiteC}, 每批${batchSize}章`);
+            this.updateStatus(`${this.config.completed}/${totalTaskCount}`);
+
+            let totalIndex = 0;
+            let batchCount = 0;
+
+            while (totalIndex < tasks.length && !this.config.cancel) {
+                const batchEnd = Math.min(totalIndex + batchSize, tasks.length);
+                const batchTasks = tasks.slice(totalIndex, batchEnd);
+                batchCount++;
+
+                console.log(`[startDownload] 第${batchCount}批: ${totalIndex + 1}-${batchEnd}/${tasks.length}`);
+                this.updateStatus(`第${batchCount}批: ${this.config.completed}/${totalTaskCount}`);
+
+                let dlCount = 0;
+                const minPerMin = this.config.maxDlPerMin;
+                let batchIndex = 0;
+
+                const scheduleNext = async (waitTime) => {
+                    while (batchIndex < batchTasks.length && !this.config.cancel) {
+                        const currentIndex = batchIndex++;
+                        console.log(`[scheduleNext] 处理任务 ${this.config.completed + 1}/${totalTaskCount}: ${batchTasks[currentIndex].title}`);
+                        
+                        if (minPerMin > 0) {
+                            if (dlCount >= minPerMin) {
+                                console.log('[scheduleNext] 达到每分钟限制，等待60秒');
+                                await this.sleep(60000);
+                                dlCount = 0;
+                            }
+                            dlCount++;
+                        }
+
+                        await this.downloadChapter(batchTasks[currentIndex]);
+
+                        if (waitTime > 0) {
+                            await this.sleep(waitTime);
+                        } else if (this.config.adaptiveDelay && this.config.delay > 0) {
+                            const delay = this.config.delay + Math.random() * 200;
+                            await this.sleep(delay);
+                        }
+                    }
+                };
+
+                const concurrency = this.config.maxConcurrency;
+                if (concurrency > 0) {
+                    const workers = [];
+                    const workerCount = Math.min(concurrency, batchTasks.length);
+                    console.log(`[startDownload] 启动 ${workerCount} 个并发 workers`);
+                    
+                    for (let i = 0; i < workerCount; i++) {
+                        workers.push(scheduleNext(this.config.delay));
+                    }
+                    await Promise.all(workers);
+                } else {
+                    const waitTime = Math.abs(concurrency) * 1000;
+                    console.log(`[startDownload] 单线程模式，间隔 ${waitTime}ms`);
+                    await scheduleNext(waitTime);
+                }
+
+                totalIndex = batchEnd;
+
+                if (!this.config.cancel) {
+                    console.log('[startDownload] 保存当前批次文件');
+                    this.saveFile();
+                    this.updateStatus(`已保存第${batchCount}批 (${this.config.completed}/${totalTaskCount})`);
+
+                    if (totalIndex < tasks.length && pauseTime > 0) {
+                        console.log(`[startDownload] C站限制，暂停 ${pauseTime / 1000}秒后继续...`);
+                        this.updateStatus(`暂停中... ${pauseTime / 1000}秒后继续下一批`);
+                        await this.sleep(pauseTime);
+                    }
+                }
+            }
+
+            console.log(`[startDownload] 下载循环结束，cancel: ${this.config.cancel}, completed: ${this.config.completed}/${totalTaskCount}`);
 
             if (!this.config.cancel) {
-                console.log('[startDownload] 调用 saveFile');
-                this.saveFile();
+                console.log('[startDownload] 全部完成，清理进度');
                 this.clearProgress();
                 console.log("✅ 全部下载完成！");
             } else {
@@ -638,8 +595,10 @@
 
             this.config.isDownloading = false;
             
-            if (downloadBtn) downloadBtn.style.display = "block";
-            if (stopBtn) stopBtn.style.display = "none";
+            if (actionBtn) {
+                actionBtn.textContent = "▶ 开始下载";
+                actionBtn.style.background = "";
+            }
             if (saveBtn) saveBtn.style.display = "block";
             
             this.hideStatusPanel();
@@ -849,21 +808,41 @@
                     color: #333;
                     box-sizing: border-box;
                 }
-                .nd-panel-title {
+                .nd-panel-header {
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
                     margin-bottom: 12px;
                 }
-                .nd-panel-title h3 {
+                .nd-panel-header h3 {
                     margin: 0;
                     color: #333;
                     font-size: 15px;
                     font-weight: bold;
                 }
-                .nd-panel-title span {
+                .nd-panel-header .nd-version {
                     color: #888;
                     font-size: 11px;
+                }
+                .nd-close-btn {
+                    width: 24px;
+                    height: 24px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    background: #f0f0f0;
+                    border: none;
+                    border-radius: 50%;
+                    color: #666;
+                    font-size: 14px;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                    line-height: 1;
+                    padding: 0;
+                }
+                .nd-close-btn:hover {
+                    background: #e0e0e0;
+                    color: #333;
                 }
                 .nd-status {
                     margin: 12px 0;
@@ -929,6 +908,21 @@
                 .nd-btn-download:hover {
                     background: #45a049;
                 }
+                .nd-btn-action {
+                    flex: 1;
+                    padding: 10px;
+                    background: #4CAF50;
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 13px;
+                    font-weight: bold;
+                    transition: background 0.2s;
+                }
+                .nd-btn-action:hover {
+                    opacity: 0.9;
+                }
                 .nd-notice {
                     position: fixed;
                     top: 20px;
@@ -942,64 +936,6 @@
                     font-size: 14px;
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                     animation: slideIn 0.3s ease;
-                }
-                .nd-verify-notice {
-                    position: fixed;
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-                    z-index: 2147483647;
-                    padding: 20px 30px;
-                    background-color: #ff9800;
-                    color: white;
-                    border-radius: 10px;
-                    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-                    font-size: 16px;
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                    text-align: center;
-                }
-                .nd-verify-notice h4 {
-                    margin: 0 0 10px 0;
-                    font-size: 18px;
-                }
-                .nd-verify-notice p {
-                    margin: 5px 0;
-                    font-size: 14px;
-                }
-                .nd-verify-buttons {
-                    position: fixed;
-                    bottom: 100px;
-                    left: 50%;
-                    transform: translateX(-50%);
-                    z-index: 2147483647;
-                    background: rgba(0, 0, 0, 0.85);
-                    color: white;
-                    padding: 20px 30px;
-                    border-radius: 10px;
-                    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-                    text-align: center;
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                    min-width: 280px;
-                }
-                .nd-verify-message {
-                    margin-bottom: 15px;
-                    font-size: 14px;
-                    line-height: 1.5;
-                }
-                .nd-btn-verify-done {
-                    background: #4CAF50;
-                    color: white;
-                    border: none;
-                    padding: 12px 30px;
-                    border-radius: 6px;
-                    font-size: 15px;
-                    font-weight: bold;
-                    cursor: pointer;
-                    transition: all 0.3s;
-                }
-                .nd-btn-verify-done:hover {
-                    background: #45a049;
-                    transform: scale(1.05);
                 }
                 @keyframes slideIn {
                     from {
@@ -1017,63 +953,55 @@
         createUI() {
             this.initShadow();
             
-            this.downloadBtn = document.createElement("button");
+            this.downloadBtn = document.createElement("div");
+            this.downloadBtn.id = "novel-downloader-btn";
             this.downloadBtn.className = "nd-btn";
-            this.downloadBtn.textContent = "📖 下载小说";
-            this.downloadBtn.onclick = () => this.showPanel();
+            this.downloadBtn.innerHTML = '<span class="nd-btn-text">📖 下载小说</span>';
+            this.downloadBtn.onclick = () => this.transformToPanel();
             
             this.shadowRoot.appendChild(this.downloadBtn);
             document.body.appendChild(this.shadowContainer);
         }
         
-        showPanel() {
-            if (this.statusPanel) {
-                this.statusPanel.style.display = "block";
-                if (this.downloadBtn) {
-                    this.downloadBtn.style.display = "none";
-                }
-                return;
-            }
+        transformToPanel() {
+            if (this.statusPanel) return;
             
-            this.statusPanel = document.createElement("div");
-            this.statusPanel.className = "nd-panel";
-            this.statusPanel.innerHTML = `
+            this.downloadBtn.className = "nd-panel";
+            this.downloadBtn.innerHTML = `
                 <div class="nd-panel-header">
-                    <h3>📖 小说下载器</h3>
-                    <span class="nd-version">v1.0</span>
+                    <div>
+                        <h3>📖 小说下载器</h3>
+                        <span class="nd-version">v1.1</span>
+                    </div>
+                    <button class="nd-close-btn" title="隐藏面板">✕</button>
                 </div>
                 <div class="nd-status">
-                    <div class="nd-progress-label">扫描中...</div>
+                    <div class="nd-progress-label">点击开始扫描...</div>
                     <div class="nd-current-chapter"></div>
                 </div>
                 <div class="nd-actions">
-                    <button class="nd-btn nd-btn-download" style="display:none;">▶ 开始下载</button>
-                    <button class="nd-btn nd-btn-stop" style="display:none;">⏹ 停止</button>
+                    <button class="nd-btn nd-btn-action nd-btn-start">▶ 开始扫描</button>
                     <button class="nd-btn nd-btn-save" style="display:none;">💾 保存</button>
-                    <button class="nd-btn nd-btn-hide">👁 隐藏</button>
                 </div>
             `;
             
+            this.statusPanel = this.downloadBtn;
             this.progressLabel = this.statusPanel.querySelector(".nd-progress-label");
             this.progressCurrent = this.statusPanel.querySelector(".nd-current-chapter");
             
-            const downloadBtn = this.statusPanel.querySelector(".nd-btn-download");
-            const stopBtn = this.statusPanel.querySelector(".nd-btn-stop");
+            const closeBtn = this.statusPanel.querySelector(".nd-close-btn");
+            const actionBtn = this.statusPanel.querySelector(".nd-btn-action");
             const saveBtn = this.statusPanel.querySelector(".nd-btn-save");
-            const hideBtn = this.statusPanel.querySelector(".nd-btn-hide");
             
-            downloadBtn.onclick = () => this.startDownload();
-            stopBtn.onclick = () => this.cancelDownload();
+            closeBtn.onclick = () => this.hideStatusPanel();
+            actionBtn.onclick = () => {
+                if (this.config.isDownloading) {
+                    this.cancelDownload();
+                } else {
+                    this.autoScanAndShowDownload();
+                }
+            };
             saveBtn.onclick = () => this.saveFile();
-            hideBtn.onclick = () => this.hideStatusPanel();
-            
-            this.shadowRoot.appendChild(this.statusPanel);
-            if (this.downloadBtn) {
-                this.downloadBtn.style.display = "none";
-            }
-            
-            // 自动扫描章节
-            this.autoScanAndShowDownload();
         }
         
         autoScanAndShowDownload() {
@@ -1090,12 +1018,16 @@
                     this.scanChaptersBySite(links, site);
                     
                     if (this.config.chapterList.length > 0) {
-                        this.updateStatus(`已扫描 ${this.config.chapterList.length} 章`);
-                        const downloadBtn = this.statusPanel.querySelector(".nd-btn-download");
-                        if (downloadBtn) {
-                            downloadBtn.style.display = "block";
+                        const hasProgress = this.config.completed > 0 && Object.keys(this.config.resultMap).length > 0;
+                        const progressHint = hasProgress ? ` (已下载${this.config.completed}章，将自动跳过)` : '';
+                        this.updateStatus(`已扫描 ${this.config.chapterList.length} 章${progressHint}，开始下载...`);
+                        const actionBtn = this.statusPanel.querySelector(".nd-btn-action");
+                        if (actionBtn) {
+                            actionBtn.textContent = "⏹ 停止下载";
+                            actionBtn.style.background = "#f44336";
                         }
-                        this.showNotice(`扫描成功，共 ${this.config.chapterList.length} 章`);
+                        this.showNotice(`扫描成功，共 ${this.config.chapterList.length} 章${progressHint}，开始下载`);
+                        this.startDownload();
                     } else {
                         this.updateStatus("未找到章节");
                         this.showNotice("未检测到章节链接");
@@ -1109,12 +1041,16 @@
         }
         
         hideStatusPanel() {
-            if (this.statusPanel) {
-                this.statusPanel.style.display = "none";
-            }
-            if (this.downloadBtn) {
-                this.downloadBtn.style.display = "block";
-            }
+            if (!this.downloadBtn) return;
+            
+            this.downloadBtn.className = "nd-btn";
+            this.downloadBtn.innerHTML = '<span class="nd-btn-text">📖 下载小说</span>';
+            this.downloadBtn.onclick = () => this.transformToPanel();
+            this.downloadBtn.style.display = "block";
+            
+            this.statusPanel = null;
+            this.progressLabel = null;
+            this.progressCurrent = null;
         }
         
         updateStatus(text) {
@@ -1147,37 +1083,6 @@
                     notice.parentNode.removeChild(notice);
                 }
             }, 3000);
-        }
-        
-        showVerifyNotice() {
-            if (this.verifyNotice) return;
-            
-            this.verifyNotice = document.createElement("div");
-            this.verifyNotice.className = "nd-verify-notice";
-            this.verifyNotice.innerHTML = `
-                <h4>🔐 检测到验证码</h4>
-                <p>请在浏览器中手动完成验证</p>
-                <p class="nd-verify-time">等待中...</p>
-            `;
-            
-            this.shadowRoot.appendChild(this.verifyNotice);
-        }
-        
-        updateVerifyNotice(waited, maxWait) {
-            if (!this.verifyNotice) return;
-            
-            const timeEl = this.verifyNotice.querySelector(".nd-verify-time");
-            if (timeEl) {
-                const remain = Math.ceil((maxWait - waited) / 1000);
-                timeEl.textContent = `剩余等待时间: ${remain}秒`;
-            }
-        }
-        
-        hideVerifyNotice() {
-            if (this.verifyNotice && this.verifyNotice.parentNode) {
-                this.verifyNotice.parentNode.removeChild(this.verifyNotice);
-                this.verifyNotice = null;
-            }
         }
         
         showSettings() {
