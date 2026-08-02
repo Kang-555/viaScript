@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小说下载器-三站整合版
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  适配三个特定小说网站，支持智能验证码处理和多种下载优化
 // @author       You
 // @match        *://*/*
@@ -30,6 +30,7 @@
                 retryCount: 5,
                 minTxtLength: 100,
                 verifyWaitTime: 5000,
+                pendingVerifyChapter: null,
             };
             
             this.cache = new Map();
@@ -88,12 +89,26 @@
             this.loadProgress();
             this.createUI();
             this.registerMenu();
+            if (this.config.pendingVerifyChapter) {
+                const next = this.config.completed + 1;
+                this.updateStatus(`⚠️ 第${next}章待验证，已完成${this.config.completed}章。请在浏览器中完成验证后点击"开始下载"继续`);
+            } else if (this.config.completed > 0) {
+                this.updateStatus(`已恢复进度: ${this.config.completed}章，点击开始下载继续`);
+            }
             console.log("📖 小说下载器-三站整合版 v1.0 已就绪");
         }
         
         registerMenu() {
             const self = this;
-            GM_registerMenuCommand("🔍 扫描章节", () => {
+            GM_registerMenuCommand("�️ 显示/隐藏面板", () => {
+                if (!self.downloadBtn) return;
+                if (self.downloadBtn.style.display === "none") {
+                    self.showStatusPanel();
+                } else {
+                    self.hideStatusPanel();
+                }
+            });
+            GM_registerMenuCommand("� 扫描章节", () => {
                 self.scanChapters();
             });
             GM_registerMenuCommand("⚙️ 设置参数", () => {
@@ -108,7 +123,8 @@
                     const data = JSON.parse(saved);
                     this.config.completed = data.completed || 0;
                     this.config.resultMap = data.resultMap || {};
-                    console.log(`📂 加载进度: ${this.config.completed}章`);
+                    this.config.pendingVerifyChapter = data.pendingVerifyChapter || null;
+                    console.log(`📂 加载进度: ${this.config.completed}章, 待验证章: ${this.config.pendingVerifyChapter ? this.config.pendingVerifyChapter.title : '无'}`);
                 } catch (e) {
                     console.warn('加载进度失败:', e);
                 }
@@ -118,7 +134,8 @@
         saveProgress() {
             const data = {
                 completed: this.config.completed,
-                resultMap: this.config.resultMap
+                resultMap: this.config.resultMap,
+                pendingVerifyChapter: this.config.pendingVerifyChapter
             };
             GM_setValue('novelDownloader_progress', JSON.stringify(data));
         }
@@ -127,6 +144,7 @@
             GM_setValue('novelDownloader_progress', '');
             this.config.completed = 0;
             this.config.resultMap = {};
+            this.config.pendingVerifyChapter = null;
         }
         
         sleep(ms) {
@@ -435,12 +453,24 @@
                 const result = `${task.title}\n\n${content}\n\n`;
                 this.config.resultMap[task.globalIndex] = result;
                 this.cache.set(task.url, result);
+
+                if (this.config.pendingVerifyChapter &&
+                    this.config.pendingVerifyChapter.globalIndex === task.globalIndex) {
+                    console.log(`[下载] 验证码章已通过，清除待验证标记`);
+                    this.config.pendingVerifyChapter = null;
+                    this.saveProgress();
+                }
                 
             } catch (e) {
                 if (e.message === 'VERIFY_DETECTED') {
                     console.warn(`⚠️ 检测到验证码，停止下载: ${task.title}`);
-                    this.config.resultMap[task.globalIndex] = `${task.title}\n\n遇到验证码，下载中断\n\n`;
+                    this.config.pendingVerifyChapter = {
+                        title: task.title,
+                        url: task.url,
+                        globalIndex: task.globalIndex
+                    };
                     this.saveProgress();
+                    this.saveFile();
                     this.config.cancel = true;
                     return;
                 }
@@ -594,14 +624,23 @@
             }
 
             this.config.isDownloading = false;
-            
+
             if (actionBtn) {
                 actionBtn.textContent = "▶ 开始下载";
                 actionBtn.style.background = "";
             }
             if (saveBtn) saveBtn.style.display = "block";
-            
-            this.hideStatusPanel();
+
+            if (!this.config.cancel) {
+                this.updateStatus(`✅ 下载完成 (${this.config.completed}/${totalTaskCount})`);
+                this.showNotice(`✅ 全部下载完成，共 ${this.config.completed} 章`);
+            } else if (this.config.pendingVerifyChapter) {
+                const next = this.config.completed + 1;
+                this.updateStatus(`⚠️ 第${next}章触发验证码，已保存进度。请在浏览器中完成验证后点击"开始下载"继续`);
+                this.showNotice(`⚠️ 验证码拦截，已保存 ${this.config.completed} 章`);
+            } else {
+                this.updateStatus(`已停止 (${this.config.completed}/${totalTaskCount})`);
+            }
         }
         
         saveFile() {
@@ -955,17 +994,6 @@
             
             this.downloadBtn = document.createElement("div");
             this.downloadBtn.id = "novel-downloader-btn";
-            this.downloadBtn.className = "nd-btn";
-            this.downloadBtn.innerHTML = '<span class="nd-btn-text">📖 下载小说</span>';
-            this.downloadBtn.onclick = () => this.transformToPanel();
-            
-            this.shadowRoot.appendChild(this.downloadBtn);
-            document.body.appendChild(this.shadowContainer);
-        }
-        
-        transformToPanel() {
-            if (this.statusPanel) return;
-            
             this.downloadBtn.className = "nd-panel";
             this.downloadBtn.innerHTML = `
                 <div class="nd-panel-header">
@@ -980,10 +1008,13 @@
                     <div class="nd-current-chapter"></div>
                 </div>
                 <div class="nd-actions">
-                    <button class="nd-btn nd-btn-action nd-btn-start">▶ 开始扫描</button>
-                    <button class="nd-btn nd-btn-save" style="display:none;">💾 保存</button>
+                    <button class="nd-btn-action nd-btn-start">▶ 开始扫描</button>
+                    <button class="nd-btn-save" style="display:none;">💾 保存</button>
                 </div>
             `;
+            
+            this.shadowRoot.appendChild(this.downloadBtn);
+            document.body.appendChild(this.shadowContainer);
             
             this.statusPanel = this.downloadBtn;
             this.progressLabel = this.statusPanel.querySelector(".nd-progress-label");
@@ -1042,15 +1073,12 @@
         
         hideStatusPanel() {
             if (!this.downloadBtn) return;
-            
-            this.downloadBtn.className = "nd-btn";
-            this.downloadBtn.innerHTML = '<span class="nd-btn-text">📖 下载小说</span>';
-            this.downloadBtn.onclick = () => this.transformToPanel();
+            this.downloadBtn.style.display = "none";
+        }
+        
+        showStatusPanel() {
+            if (!this.downloadBtn) return;
             this.downloadBtn.style.display = "block";
-            
-            this.statusPanel = null;
-            this.progressLabel = null;
-            this.progressCurrent = null;
         }
         
         updateStatus(text) {
