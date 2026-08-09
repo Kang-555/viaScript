@@ -1240,7 +1240,7 @@
             } else if (this.config.pendingVerifyChapter) {
                 this.updateStatus(`⚠️ 验证码拦截，已保存 ${this.config.chapters.length} 章。完成验证后点击继续`, 'warn');
             } else {
-                this.updateStatus(`已停止 (${this.config.chapters.length}/${tasks.length})`);
+                this.updateStatus(`已取消 (${this.config.chapters.length}/${tasks.length})`);
             }
         }
 
@@ -1364,7 +1364,7 @@
             } else if (this.config.pendingVerifyChapter) {
                 this.updateStatus(`⚠️ 验证码拦截，已保存 ${this.config.chapters.length} 章。完成验证后点击继续`);
             } else {
-                this.updateStatus(`已停止 (${this.config.chapters.length} 章)`);
+                this.updateStatus(`已取消 (${this.config.chapters.length} 章)`);
             }
         }
 
@@ -1439,15 +1439,19 @@
             this.showNotice(`⚠️ 验证码拦截，已保存 ${this.config.chapters.length} 章`);
         }
 
-        // ========== 取消 ==========
+        // ========== 清空 ==========
 
-        cancelDownload() {
+        handleClearClick() {
+            if (!confirm('确定清空所有已下载内容和进度？')) return;
             this.config.cancel = true;
             this.config.isPaused = false;
             this.config.isRunning = false;
             this.removeScrollListener();
-            this.updateStatus('正在停止...');
+            this.clearProgress();
+            this.updateStatus('已清空');
             this.updateRunningUI(false);
+            this.updateChapterList();
+            this.updateCurrentChapter('');
         }
 
         // ========== UI 构建 ==========
@@ -1521,7 +1525,7 @@
                 .btn-scan { background: #6c757d; }
                 .btn-start { background: #27ae60; }
                 .btn-pause { background: #f5a623; }
-                .btn-stop { background: #e74c3c; }
+                .btn-clear { background: #e74c3c; }
                 .btn-save { background: #4a90e2; }
                 .count-line {
                     display: flex; justify-content: space-between;
@@ -1613,7 +1617,7 @@
                         <button class="btn btn-scan" id="btn-scan">🔍 扫描</button>
                         <button class="btn btn-start" id="btn-start">▶ 开始</button>
                         <button class="btn btn-pause" id="btn-pause" style="display:none">⏸ 暂停</button>
-                        <button class="btn btn-stop" id="btn-stop" style="display:none">⏹ 停止</button>
+                        <button class="btn btn-clear" id="btn-clear" style="display:none">🗑 清空</button>
                         <button class="btn btn-save" id="btn-save">💾 保存</button>
                     </div>
                     <div class="count-line">
@@ -1644,7 +1648,7 @@
             this.scanBtn = this.shadowRoot.getElementById('btn-scan');
             this.actionBtn = this.shadowRoot.getElementById('btn-start');
             this.pauseBtn = this.shadowRoot.getElementById('btn-pause');
-            this.stopBtn = this.shadowRoot.getElementById('btn-stop');
+            this.clearBtn = this.shadowRoot.getElementById('btn-clear');
             this.saveBtn = this.shadowRoot.getElementById('btn-save');
 
             // 事件
@@ -1655,7 +1659,7 @@
             this.scanBtn.addEventListener('click', () => this.handleScanClick());
             this.actionBtn.addEventListener('click', () => this.handleActionClick());
             this.pauseBtn.addEventListener('click', () => this.handlePauseClick());
-            this.stopBtn.addEventListener('click', () => this.cancelDownload());
+            this.clearBtn.addEventListener('click', () => this.handleClearClick());
             this.saveBtn.addEventListener('click', () => this.handleSaveClick());
 
             this.shadowRoot.getElementById('select-all').addEventListener('click', () => this.selectAll(true));
@@ -1800,12 +1804,12 @@
             if (isRunning) {
                 this.actionBtn.style.display = 'none';
                 this.pauseBtn.style.display = 'block';
-                this.stopBtn.style.display = 'block';
+                this.clearBtn.style.display = 'block';
                 this.scanBtn.disabled = true;
             } else {
                 this.actionBtn.style.display = 'block';
                 this.pauseBtn.style.display = 'none';
-                this.stopBtn.style.display = 'none';
+                this.clearBtn.style.display = 'none';
                 this.scanBtn.disabled = false;
             }
         }
@@ -1875,8 +1879,8 @@
                     this.pauseBtn.textContent = '▶ 继续';
                 }
             } else {
-                // 批量模式不支持暂停，仅停止
-                this.updateStatus('批量模式不支持暂停，请用停止', 'warn');
+                // 批量模式不支持暂停，仅清空
+                this.updateStatus('批量模式不支持暂停，请用清空', 'warn');
             }
         }
 

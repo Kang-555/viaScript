@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小说下载器-元素版
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      3.3
 // @description  适配特定小说网站结构，带状态面板和多种优化
 // @author       You
 // @match        *://*/*
@@ -37,7 +37,6 @@ class NovelDownloader {
     this.sites = {
       a: {
         name: 'a',
-        host: /fanqienovel\.com$/,
         chapterSelector: 'a.detail-page__catalog-item',
         numSelector: '.detail-page__chapter-badge',
         titleSelector: '.detail-page__chapter-title',
@@ -47,7 +46,6 @@ class NovelDownloader {
       },
       b: {
         name: 'b',
-        host: /qidian\.com$/,
         chapterSelector: '#chapters .novel-list a',
         titleSelector: 'h4',
         titleSelectors: ['.book-title', 'h1.book-title'],
@@ -62,21 +60,8 @@ class NovelDownloader {
   
   init() {
     this.loadProgress();
-    const matched = this.matchSite();
-    if (matched) {
-      this.createUI();
-      console.log(`📖 小说下载器v5.0已就绪 (${matched.name})`);
-    } else {
-      console.log("📖 小说下载器v5.0 未匹配站点，不注入UI");
-    }
-  }
-  
-  matchSite() {
-    const sites = [this.sites.a, this.sites.b];
-    for (const site of sites) {
-      if (site.host && site.host.test(location.hostname)) return site;
-    }
-    return null;
+    this.createUI();
+    console.log("📖 小说下载器v5.1已就绪");
   }
   
   sleep(ms) {
@@ -347,10 +332,9 @@ class NovelDownloader {
   scanChapters() {
     this.config.chapterList = [];
     this.currentSite = null;
-    
+
     const sites = [this.sites.a, this.sites.b];
     for (const site of sites) {
-      if (site.host && !site.host.test(location.hostname)) continue;
       const links = document.querySelectorAll(site.chapterSelector);
       if (links.length > 0) {
         this.currentSite = site;
