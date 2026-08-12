@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         链接净化｜新标签打开+去中转直达+去广告
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  去除外链中转跳转直达原链接、链接新标签打开、隐藏网页广告、清理追踪参数（性能优化版）
 // @author       You
 // @match        *://*/*
@@ -67,7 +67,9 @@
         // 通用 ?target= 中转兜底
         { reg: /[?&]target=(https?:\/\/[^&]+)/, get: m => decodeURIComponent(m[1]) },
         // 通用 ?jump= / ?redirect= / ?to=
-        { reg: /[?&](?:jump|redirect|to|goto|link)=(https?:\/\/[^&]+)/, get: m => decodeURIComponent(m[1]) }
+        { reg: /[?&](?:jump|redirect|to|goto|link)=(https?:\/\/[^&]+)/, get: m => decodeURIComponent(m[1]) },
+        // /pop?url= 广告中转
+        { reg: /\/pop\?url=(https?:\/\/[^&]+)/, get: m => decodeURIComponent(m[1]) }
     ];
 
     /**
@@ -220,6 +222,29 @@
             const link = e.target.closest('a');
             if (!link || link.dataset.linkProcessed) return;
             
+            // 检查是否在视频播放器区域内点击
+            const isInVideoPlayer = e.target.closest('video, .video-player, .player, .video-container, #player, .video-wrap, .play-area');
+            
+            if (isInVideoPlayer) {
+                const href = link.href || '';
+                
+                // 检测 /pop?url= 广告链接
+                if (/\/pop\?url=/i.test(href)) {
+                    console.log('[链接净化] 拦截视频播放器区域/pop广告:', href);
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    return;
+                }
+                
+                // 检测其他广告特征
+                if (/ad|popup|modal|promo|offer|coupon/i.test(href)) {
+                    console.log('[链接净化] 拦截视频播放器区域广告链接:', href);
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    return;
+                }
+            }
+            
             // 点击时立即处理该链接
             processLink(link);
         }, true); // 捕获阶段，优先于页面自身事件
@@ -250,12 +275,96 @@
         });
     }
 
+    /**
+     * 优化点10：拦截弹出式弹窗广告
+     * 包括：window.open弹窗、定时弹窗、点击触发弹窗、遮罩层弹窗
+     */
+    function blockPopupAds() {
+        // 1. 拦截可疑的window.open（广告弹窗特征）
+        const originalOpen = window.open;
+        window.open = function(url, name, specs) {
+            // 检测广告弹窗特征
+            const isAdPopup = (
+                // 小窗口（常见广告尺寸）
+                (specs && (specs.includes('width=') || specs.includes('height=')) && 
+                 specs.includes('toolbar=no') && specs.includes('menubar=no')) ||
+                // 常见广告域名
+                (url && /ad|popup|modal|dialog|promo|offer|coupon/i.test(url)) ||
+                // 空URL或about:blank（可能是注入广告）
+                (!url || url === 'about:blank')
+            );
+
+            if (isAdPopup) {
+                console.log('[链接净化] 拦截弹窗广告:', url);
+                return null; // 阻止弹窗
+            }
+
+            // 正常弹窗，清洗URL后放行
+            const cleanUrl = cleanLinkUrl(url);
+            return originalOpen.call(this, cleanUrl, name, specs);
+        };
+
+        // 2. 阻止常见弹窗触发事件
+        document.addEventListener('click', (e) => {
+            const target = e.target;
+            
+            // 检测可疑的弹窗触发元素
+            const isPopupTrigger = (
+                // 带有popup/modal/dialog相关onclick
+                (target.onclick && /window\.open|alert|confirm|showModal/i.test(target.onclick.toString())) ||
+                // 带有data-popup/data-modal属性
+                target.dataset.popup || target.dataset.modal || target.dataset.dialog
+            );
+
+            if (isPopupTrigger) {
+                // 检查是否为广告弹窗
+                const onclickStr = target.onclick ? target.onclick.toString() : '';
+                if (/ad|promo|offer|coupon|subscribe/i.test(onclickStr)) {
+                    console.log('[链接净化] 拦截点击触发弹窗广告');
+                    e.stopImmediatePropagation();
+                    e.preventDefault();
+                }
+            }
+        }, true);
+
+        // 3. 拦截setTimeout/setInterval定时弹窗
+        const originalSetTimeout = window.setTimeout;
+        const originalSetInterval = window.setInterval;
+        
+        window.setTimeout = function(func, delay, ...args) {
+            if (typeof func === 'string' && /window\.open|alert|confirm|popup/i.test(func)) {
+                console.log('[链接净化] 拦截定时弹窗');
+                return null;
+            }
+            if (typeof func === 'function') {
+                const funcStr = func.toString();
+                if (/window\.open|alert|confirm|showModal|popup/i.test(funcStr)) {
+                    // 检查函数名或内容是否包含广告关键词
+                    if (/ad|promo|offer|coupon/i.test(funcStr)) {
+                        console.log('[链接净化] 拦截定时弹窗广告');
+                        return null;
+                    }
+                }
+            }
+            return originalSetTimeout.call(this, func, delay, ...args);
+        };
+
+        window.setInterval = function(func, delay, ...args) {
+            if (typeof func === 'string' && /window\.open|alert|confirm|popup/i.test(func)) {
+                console.log('[链接净化] 拦截定时循环弹窗');
+                return null;
+            }
+            return originalSetInterval.call(this, func, delay, ...args);
+        };
+    }
+
     // ========== 执行策略 ==========
     
     // 策略1：立即执行（如果DOM已可用）
     if (document.documentElement) {
         processLinks();
         interceptDynamicLinks();
+        blockPopupAds();
     }
     
     // 策略2：DOM加载完成
@@ -263,6 +372,7 @@
         processLinks();
         interceptDynamicLinks();
         setupEventDelegation();
+        blockPopupAds();
     });
     
     // 策略3：页面完全加载

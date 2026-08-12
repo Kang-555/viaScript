@@ -369,6 +369,8 @@
         controller.style.opacity = "1";
         controller.style.transform = "translateX(-50%) translateY(0)";
         controller.style.pointerEvents = "auto";
+        // 重新填充DOM缓存，解决进度条卡住问题
+        refreshDomCache();
       }
     } else {
       if (controller) {
@@ -379,6 +381,16 @@
       // 清理DOM缓存
       clearDomCache();
     }
+  }
+
+  function refreshDomCache() {
+    if (!controller) return;
+    domCache.playPauseBtn = document.getElementById("play-pause-btn");
+    domCache.progressFill = document.getElementById("progress-bar-fill");
+    domCache.progressThumb = document.getElementById("progress-thumb");
+    domCache.progressCurrentTime = document.getElementById("progress-current-time");
+    domCache.progressTotalTime = document.getElementById("progress-total-time");
+    domCache.progressBarContainer = document.getElementById("progress-bar-container");
   }
 
   function clearDomCache() {
@@ -394,7 +406,7 @@
 
   function refreshToggleUI() {
     if (!toggleButton) return;
-    toggleButton.textContent = isEnabled ? "⏸" : "▶";
+    toggleButton.textContent = isEnabled ? "▼" : "▲";
     toggleButton.style.background = isEnabled ? CONFIG.accentColor : CONFIG.buttonColor;
   }
 
