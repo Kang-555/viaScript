@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         视频悬浮精确控制工具(智能主视频版)
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.3
 // @description  智能识别主视频自动播放，两行紧凑控制条支持精确跳转、长按快进、倍速控制
 // @author       You
 // @match        *://*/*
@@ -31,7 +31,8 @@
     autoPlayEnabled: true,
     autoPlayDelay: 200,
     autoPlayRetryInterval: 300,
-    autoPlayMaxRetries: 8
+    autoPlayMaxRetries: 8,
+    holdSpeed: 3
   };
 
   // ========== 状态变量 ==========
@@ -39,12 +40,16 @@
   let controller = null;
   let toggleButton = null;
   let timeUpdateInterval = null;
-  let holdTimer = null;
-  const holdSpeed = 3;
-  let originPlayRate = 1;
-  let mainVideo = null;
   let autoPlayTriggered = false;
   let autoPlayRetryCount = 0;
+  
+  // 按钮长按定时器 Map（每个按钮独立）
+  const holdTimers = new Map();
+  
+  // getMainVideo 节流缓存
+  let mainVideoCache = null;
+  let mainVideoCacheTime = 0;
+  const MAIN_VIDEO_CACHE_TTL = 300; // ms
   
   // DOM元素缓存，避免重复查询
   let domCache = {
@@ -53,8 +58,16 @@
     progressThumb: null,
     progressCurrentTime: null,
     progressTotalTime: null,
-    progressBarContainer: null
+    progressBarContainer: null,
+    speedSelect: null
   };
+
+  // 全局事件监听器引用（用于 destroy 时清理）
+  let progressMousemoveHandler = null;
+  let progressTouchmoveHandler = null;
+  let progressMouseupHandler = null;
+  let progressTouchendHandler = null;
+  let controllerObserver = null;
 
   // ========== 主视频识别逻辑 ==========
 
@@ -63,34 +76,42 @@
    * 过滤掉预览小视频、缩略图、hover预览等干扰项
    */
   function getMainVideo() {
+    // 节流缓存：TTL 内直接返回上次结果，减少 getBoundingClientRect 调用
+    const now = Date.now();
+    if (now - mainVideoCacheTime < MAIN_VIDEO_CACHE_TTL) {
+      return mainVideoCache;
+    }
+
     const allVideos = Array.from(document.querySelectorAll('video'));
-    if (allVideos.length === 0) return null;
+    let result = null;
+    if (allVideos.length > 0) {
+      // 第一步：尺寸过滤 + 可视性过滤
+      const candidates = allVideos.filter(v => {
+        const rect = v.getBoundingClientRect();
+        // 尺寸阈值过滤（使用 offsetWidth/offsetHeight 避免强制重排）
+        const isBigEnough = v.offsetWidth >= CONFIG.minWidth && v.offsetHeight >= CONFIG.minHeight;
+        // 可视性检查：在视口内且未被隐藏
+        // rect.width/height > 0 已排除 display:none，再检查 visibility
+        const isVisible = rect.width > 0 && rect.height > 0
+          && rect.bottom > 0 && rect.top < window.innerHeight
+          && v.style.visibility !== 'hidden';
+        return isBigEnough && isVisible;
+      });
 
-    // 第一步：尺寸过滤 + 可视性过滤
-    const candidates = allVideos.filter(v => {
-      const rect = v.getBoundingClientRect();
-      // 尺寸阈值过滤
-      const isBigEnough = v.clientWidth >= CONFIG.minWidth && v.clientHeight >= CONFIG.minHeight;
-      // 可视性检查：在视口内且未被隐藏
-      const isVisible = rect.width > 0 && rect.height > 0
-        && rect.bottom > 0 && rect.top < window.innerHeight
-        && getComputedStyle(v).display !== 'none'
-        && getComputedStyle(v).visibility !== 'hidden';
-      return isBigEnough && isVisible;
-    });
-
-    // 第二步：仅当恰好1个符合条件时，认定为主视频
-    if (candidates.length === 1) {
-      return candidates[0];
+      // 第二步：仅当恰好1个符合条件时，认定为主视频
+      if (candidates.length === 1) {
+        result = candidates[0];
+      } else if (candidates.length > 1) {
+        // 第三步：如果有多个候选，选择面积最大的
+        candidates.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
+        result = candidates[0];
+      }
     }
 
-    // 第三步：如果有多个候选，选择面积最大的
-    if (candidates.length > 1) {
-      candidates.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
-      return candidates[0];
-    }
-
-    return null;
+    // 更新缓存
+    mainVideoCache = result;
+    mainVideoCacheTime = now;
+    return result;
   }
 
   /**
@@ -113,7 +134,6 @@
 
     // 标记已触发，防止重复
     autoPlayTriggered = true;
-    mainVideo = vid;
     vid.dataset.autoPlayTriggered = "1";
 
     // 尝试播放
@@ -153,6 +173,9 @@
       color: ${CONFIG.textColor};
       transition: all 0.3s ease;
       border:none;
+      -webkit-user-select:none;
+      user-select:none;
+      -webkit-touch-callout:none;
       ${isEnabled ? 'opacity: 1; transform: translateX(-50%) translateY(0);' : 'opacity: 0; transform: translateX(-50%) translateY(20px); pointer-events: none;'}
     `;
 
@@ -174,6 +197,7 @@
     speedBox.innerHTML = `<span style="font-size:12px">速度</span>`;
 
     const speedSel = document.createElement("select");
+    speedSel.id = "speed-select";
     speedSel.innerHTML = `
       <option value="0.25">0.25x</option>
       <option value="0.5">0.5x</option>
@@ -192,6 +216,7 @@
       if (vid) vid.playbackRate = +e.target.value;
     };
     speedBox.appendChild(speedSel);
+    domCache.speedSelect = speedSel;
 
     // 播放/暂停按钮
     const playPauseBtn = document.createElement("button");
@@ -260,44 +285,50 @@
     domCache.progressTotalTime = totalTimeLabel;
     domCache.progressBarContainer = progressBarContainer;
     
-    // 进度条交互
+    // 进度条交互（拖动不 seek，抬起才执行，避免视频抖动）
     let isDragging = false;
+    let dragPercent = 0;
     
-    const updateProgress = (e) => {
+    const updateDragUI = (e) => {
       const vid = getMainVideo();
       if (!vid || !vid.duration) return;
       
       const rect = domCache.progressBarContainer.getBoundingClientRect();
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      dragPercent = percent;
       
-      vid.currentTime = percent * vid.duration;
       domCache.progressFill.style.width = `${percent * 100}%`;
       domCache.progressThumb.style.left = `${percent * 100}%`;
-      domCache.progressCurrentTime.textContent = formatTime(vid.currentTime);
+      domCache.progressCurrentTime.textContent = formatTime(percent * vid.duration);
     };
     
+    const seekToDrag = () => {
+      const vid = getMainVideo();
+      if (!vid || !vid.duration) return;
+      vid.currentTime = dragPercent * vid.duration;
+    };
+    
+    // 进度条全局监听器（命名函数，便于 destroy 时清理）
+    progressMousemoveHandler = (e) => { if (isDragging) updateDragUI(e); };
+    progressTouchmoveHandler = (e) => { if (isDragging) updateDragUI(e); };
+    progressMouseupHandler = () => { if (isDragging) { isDragging = false; seekToDrag(); } };
+    progressTouchendHandler = () => { if (isDragging) { isDragging = false; seekToDrag(); } };
+
     progressBarContainer.addEventListener('mousedown', (e) => {
       isDragging = true;
-      updateProgress(e);
+      updateDragUI(e);
     });
     
     progressBarContainer.addEventListener('touchstart', (e) => {
       isDragging = true;
-      updateProgress(e);
+      updateDragUI(e);
     }, { passive: true });
     
-    document.addEventListener('mousemove', (e) => {
-      if (isDragging) updateProgress(e);
-    });
-    
-    document.addEventListener('touchmove', (e) => {
-      if (isDragging) updateProgress(e);
-    }, { passive: true });
-    
-    const stopDrag = () => { isDragging = false; };
-    document.addEventListener('mouseup', stopDrag);
-    document.addEventListener('touchend', stopDrag);
+    document.addEventListener('mousemove', progressMousemoveHandler);
+    document.addEventListener('touchmove', progressTouchmoveHandler, { passive: true });
+    document.addEventListener('mouseup', progressMouseupHandler);
+    document.addEventListener('touchend', progressTouchendHandler);
 
     // 缓存DOM引用
     domCache.playPauseBtn = playPauseBtn;
@@ -305,18 +336,56 @@
     controller.append(controlWrap, progressWrap);
     document.body.appendChild(controller);
 
-    // 更新时间显示和播放状态
-    if (timeUpdateInterval) clearInterval(timeUpdateInterval);
+    // 绑定视频播放/暂停事件，动态启停 UI 更新
+    const vid = getMainVideo();
+    if (vid) bindVideoEvents(vid);
+
+    // DOM保护（保存引用以便 destroy 时清理）
+    controllerObserver = new MutationObserver(() => {
+      if (!document.body.contains(controller)) document.body.appendChild(controller);
+    });
+    controllerObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // 视频事件监听器引用（用于 destroy 时清理）
+  let videoPlayHandler = null;
+  let videoPauseHandler = null;
+
+  function startTimeInterval() {
+    if (timeUpdateInterval) return;
     timeUpdateInterval = setInterval(() => {
+      const vid = getMainVideo();
+      if (!vid || !isEnabled) {
+        clearInterval(timeUpdateInterval);
+        timeUpdateInterval = null;
+        return;
+      }
       updateTimeDisplay();
       autoHideWhenNoVideo();
     }, 300);
+  }
 
-    // DOM保护
-    const obs = new MutationObserver(() => {
-      if (!document.body.contains(controller)) document.body.appendChild(controller);
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
+  function stopTimeInterval() {
+    if (timeUpdateInterval) {
+      clearInterval(timeUpdateInterval);
+      timeUpdateInterval = null;
+    }
+  }
+
+  // 监听视频播放/暂停事件，动态启停 UI 更新
+  function bindVideoEvents(vid) {
+    // 先清理旧的监听器
+    if (videoPlayHandler) vid.removeEventListener('play', videoPlayHandler);
+    if (videoPauseHandler) vid.removeEventListener('pause', videoPauseHandler);
+
+    videoPlayHandler = () => startTimeInterval();
+    videoPauseHandler = () => stopTimeInterval();
+
+    vid.addEventListener('play', videoPlayHandler);
+    vid.addEventListener('pause', videoPauseHandler);
+
+    // 初始状态：如果正在播放则启动定时器
+    if (!vid.paused) startTimeInterval();
   }
 
   function createLargeButton(text, stepSec) {
@@ -325,37 +394,64 @@
     btn.style.cssText = `
       flex:1;padding:11px 2px;border:none;border-radius:10px;background:${CONFIG.accentColor};
       color:${CONFIG.textColor};font-weight:bold;font-size:13px;white-space:nowrap;transition:0.16s;
+      -webkit-user-select:none;user-select:none;
     `;
 
     const jumpOnce = () => adjustMainVideoTime(stepSec);
-    const holdStart = () => {
+    let isLongPress = false;
+    let holdDelayTimer = null;
+    let holdIntervalTimer = null;
+    let btnOriginPlayRate = 1; // 按钮级别存储原始倍速
+
+    const holdStart = (e) => {
       const vid = getMainVideo();
       if (!vid) return;
-      originPlayRate = vid.playbackRate;
-      vid.playbackRate = holdSpeed;
-      holdTimer = setInterval(() => adjustMainVideoTime(stepSec), 200);
+      // 延迟启动长按，给短按点击留出时间窗口
+      holdDelayTimer = setTimeout(() => {
+        isLongPress = true;
+        e.preventDefault();
+        btnOriginPlayRate = vid.playbackRate;
+        vid.playbackRate = CONFIG.holdSpeed;
+        holdIntervalTimer = setInterval(() => adjustMainVideoTime(stepSec), 200);
+        holdTimers.set(btn, holdIntervalTimer);
+      }, 300);
     };
     const holdStop = () => {
-      clearInterval(holdTimer); holdTimer = null;
-      const vid = getMainVideo();
-      if (vid) vid.playbackRate = originPlayRate;
+      if (holdDelayTimer) {
+        clearTimeout(holdDelayTimer);
+        holdDelayTimer = null;
+      }
+      if (holdIntervalTimer) {
+        clearInterval(holdIntervalTimer);
+        holdTimers.delete(btn);
+        holdIntervalTimer = null;
+      }
+      if (isLongPress) {
+        const vid = getMainVideo();
+        if (vid) vid.playbackRate = btnOriginPlayRate;
+        isLongPress = false;
+      }
     };
+    const onContext = (e) => e.preventDefault();
 
     btn.addEventListener('mousedown', holdStart);
-    btn.addEventListener('touchstart', holdStart);
+    btn.addEventListener('touchstart', holdStart, { passive: false });
     btn.addEventListener('mouseup', holdStop);
     btn.addEventListener('mouseleave', holdStop);
     btn.addEventListener('touchend', holdStop);
+    btn.addEventListener('touchcancel', holdStop);
     btn.addEventListener('click', jumpOnce);
+    btn.addEventListener('contextmenu', onContext);
 
     // 按压动画
-    const pressDown = () => btn.style.transform = "scale(0.96)";
+    const pressDown = (e) => { btn.style.transform = "scale(0.96)"; };
     const pressUp = () => btn.style.transform = "scale(1)";
     btn.addEventListener('mousedown', pressDown);
-    btn.addEventListener('touchstart', pressDown);
+    btn.addEventListener('touchstart', pressDown, { passive: false });
     btn.addEventListener('mouseup', pressUp);
     btn.addEventListener('mouseleave', pressUp);
     btn.addEventListener('touchend', pressUp);
+    btn.addEventListener('touchcancel', pressUp);
     return btn;
   }
 
@@ -391,6 +487,7 @@
     domCache.progressCurrentTime = document.getElementById("progress-current-time");
     domCache.progressTotalTime = document.getElementById("progress-total-time");
     domCache.progressBarContainer = document.getElementById("progress-bar-container");
+    domCache.speedSelect = document.getElementById("speed-select");
   }
 
   function clearDomCache() {
@@ -400,7 +497,8 @@
       progressThumb: null,
       progressCurrentTime: null,
       progressTotalTime: null,
-      progressBarContainer: null
+      progressBarContainer: null,
+      speedSelect: null
     };
   }
 
@@ -452,6 +550,18 @@
       domCache.playPauseBtn.textContent = vid.paused ? "▶" : "⏸";
     }
     
+    // 同步倍速下拉选择
+    if (domCache.speedSelect) {
+      const rate = vid.playbackRate;
+      if (Math.abs(+domCache.speedSelect.value - rate) > 0.01) {
+        // 找到最接近的选项
+        const closest = Array.from(domCache.speedSelect.options).reduce((a, b) =>
+          Math.abs(+a.value - rate) < Math.abs(+b.value - rate) ? a : b
+        );
+        domCache.speedSelect.value = closest.value;
+      }
+    }
+    
     // 更新进度条
     if (vid.duration && domCache.progressFill) {
       const percent = (vid.currentTime / vid.duration) * 100;
@@ -471,7 +581,60 @@
     }
   }
 
-  // ========== 初始化 ==========
+  // ========== 初始化 / 销毁 ==========
+
+  function destroy() {
+    stopTimeInterval();
+    // 清理视频播放/暂停事件监听器
+    const vid = getMainVideo();
+    if (vid) {
+      if (videoPlayHandler) vid.removeEventListener('play', videoPlayHandler);
+      if (videoPauseHandler) vid.removeEventListener('pause', videoPauseHandler);
+    }
+    videoPlayHandler = null;
+    videoPauseHandler = null;
+    // 清理长按定时器（包括 setTimeout 和 setInterval）
+    for (const timer of holdTimers.values()) {
+      clearTimeout(timer);
+      clearInterval(timer);
+    }
+    holdTimers.clear();
+    // 清理进度条全局事件监听器
+    if (progressMousemoveHandler) document.removeEventListener('mousemove', progressMousemoveHandler);
+    if (progressTouchmoveHandler) document.removeEventListener('touchmove', progressTouchmoveHandler);
+    if (progressMouseupHandler) document.removeEventListener('mouseup', progressMouseupHandler);
+    if (progressTouchendHandler) document.removeEventListener('touchend', progressTouchendHandler);
+    progressMousemoveHandler = null;
+    progressTouchmoveHandler = null;
+    progressMouseupHandler = null;
+    progressTouchendHandler = null;
+    // 清理 DOM 保护 Observer
+    if (controllerObserver) {
+      controllerObserver.disconnect();
+      controllerObserver = null;
+    }
+    // 清理视频检测 Observer
+    if (videoObserver) {
+      videoObserver.disconnect();
+      videoObserver = null;
+    }
+    // 移除 DOM
+    if (controller && controller.parentNode) controller.parentNode.removeChild(controller);
+    if (toggleButton && toggleButton.parentNode) toggleButton.parentNode.removeChild(toggleButton);
+    controller = null;
+    toggleButton = null;
+    domCache = {
+      playPauseBtn: null,
+      progressFill: null,
+      progressThumb: null,
+      progressCurrentTime: null,
+      progressTotalTime: null,
+      progressBarContainer: null,
+      speedSelect: null
+    };
+    mainVideoCache = null;
+    mainVideoCacheTime = 0;
+  }
 
   function init() {
     createToggleButton();
@@ -488,16 +651,61 @@
     init();
   }
 
-  // 监听DOM变化，检测新视频
-  const videoObserver = new MutationObserver(() => {
+  // ========== SPA 单页兼容 ==========
+
+  // 防抖重置，避免频繁路由切换导致 UI 闪烁
+  let spaResetTimer = null;
+  function resetForSPA() {
+    if (spaResetTimer) clearTimeout(spaResetTimer);
+    spaResetTimer = setTimeout(() => {
+      autoPlayTriggered = false;
+      autoPlayRetryCount = 0;
+      destroy();
+      init();
+      spaResetTimer = null;
+    }, 500);
+  }
+
+  // 监听 popstate（浏览器后退/前进）
+  window.addEventListener('popstate', resetForSPA);
+
+  // 拦截 pushState / replaceState（SPA 内部路由切换）
+  const origPushState = history.pushState;
+  const origReplaceState = history.replaceState;
+  history.pushState = function(...args) {
+    origPushState.apply(this, args);
+    resetForSPA();
+  };
+  history.replaceState = function(...args) {
+    origReplaceState.apply(this, args);
+    resetForSPA();
+  };
+
+  // 防抖工具
+  function debounce(fn, delay) {
+    let timer = null;
+    return function(...args) {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => fn.apply(this, args), delay);
+    };
+  }
+
+  // 监听DOM变化，检测新视频（防抖，只监听 childList）
+  const debouncedVideoCheck = debounce(() => {
     if (!autoPlayTriggered) {
       tryAutoPlayMainVideo();
     }
     autoHideWhenNoVideo();
-  });
+    // 有视频时确保定时器运行
+    if (getMainVideo() && !timeUpdateInterval) {
+      startTimeInterval();
+    }
+  }, 300);
+  let videoObserver = null;
 
   setTimeout(() => {
     if (document.body) {
+      videoObserver = new MutationObserver(debouncedVideoCheck);
       videoObserver.observe(document.body, { childList: true, subtree: true });
     }
   }, 1000);
