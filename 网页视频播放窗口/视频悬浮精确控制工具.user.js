@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         视频悬浮精确控制工具(智能主视频版)
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  智能识别主视频自动播放，两行紧凑控制条支持精确跳转、长按快进、倍速控制
 // @author       You
 // @match        *://*/*
@@ -43,8 +43,11 @@
   let autoPlayTriggered = false;
   let autoPlayRetryCount = 0;
   
-  // 按钮长按定时器 Map（每个按钮独立）
-  const holdTimers = new Map();
+  // 持续前进按钮状态
+  let forwardHoldActive = false;
+  let forwardHoldTimer = null;
+  let forwardOriginRate = 1;
+  let forwardButton = null;
   
   // getMainVideo 节流缓存
   let mainVideoCache = null;
@@ -59,6 +62,7 @@
     progressCurrentTime: null,
     progressTotalTime: null,
     progressBarContainer: null,
+    speedBtn: null,
     speedSelect: null
   };
 
@@ -87,15 +91,17 @@
     if (allVideos.length > 0) {
       // 第一步：尺寸过滤 + 可视性过滤
       const candidates = allVideos.filter(v => {
-        const rect = v.getBoundingClientRect();
         // 尺寸阈值过滤（使用 offsetWidth/offsetHeight 避免强制重排）
         const isBigEnough = v.offsetWidth >= CONFIG.minWidth && v.offsetHeight >= CONFIG.minHeight;
-        // 可视性检查：在视口内且未被隐藏
-        // rect.width/height > 0 已排除 display:none，再检查 visibility
-        const isVisible = rect.width > 0 && rect.height > 0
-          && rect.bottom > 0 && rect.top < window.innerHeight
+        if (!isBigEnough) return false;
+        // 可视性检查：rect 异常时使用 offset 备选
+        const rect = v.getBoundingClientRect();
+        const rectValid = rect.width > 0 && rect.height > 0;
+        const offsetValid = v.offsetWidth > 0 && v.offsetHeight > 0;
+        const isVisible = (rectValid || offsetValid)
+          && (rectValid ? (rect.bottom > 0 && rect.top < window.innerHeight) : true)
           && v.style.visibility !== 'hidden';
-        return isBigEnough && isVisible;
+        return isVisible;
       });
 
       // 第二步：仅当恰好1个符合条件时，认定为主视频
@@ -191,14 +197,21 @@
     ];
     jumpButtons.forEach(item => controlWrap.appendChild(createLargeButton(item.text, item.seconds)));
 
-    // 速度选择器
-    const speedBox = document.createElement("div");
-    speedBox.style.cssText = `display:flex;align-items:center;gap:4px;flex-shrink:0;`;
-    speedBox.innerHTML = `<span style="font-size:12px">速度</span>`;
+    // 速度选择器（按钮 + 上拉菜单）
+    const speedWrap = document.createElement("div");
+    speedWrap.style.cssText = `position:relative;flex-shrink:0;`;
 
-    const speedSel = document.createElement("select");
-    speedSel.id = "speed-select";
-    speedSel.innerHTML = `
+    const speedBtn = document.createElement("button");
+    speedBtn.id = "speed-btn";
+    speedBtn.textContent = "1x";
+    speedBtn.style.cssText = `
+      background:${CONFIG.buttonColor};color:${CONFIG.textColor};border:none;border-radius:8px;
+      padding:5px 10px;cursor:pointer;font-size:13px;min-width:42px;transition:0.16s;
+    `;
+
+    const speedMenu = document.createElement("select");
+    speedMenu.id = "speed-select";
+    speedMenu.innerHTML = `
       <option value="0.25">0.25x</option>
       <option value="0.5">0.5x</option>
       <option value="0.75">0.75x</option>
@@ -208,15 +221,34 @@
       <option value="2">2x</option>
       <option value="4">4x</option>
     `;
-    speedSel.style.cssText = `
-      background:${CONFIG.buttonColor};color:${CONFIG.textColor};border:none;border-radius:8px;padding:5px 8px;min-width:62px;
+    speedMenu.style.cssText = `
+      position:absolute;bottom:100%;left:50%;transform:translateX(-50%);
+      background:${CONFIG.buttonColor};color:${CONFIG.textColor};border:none;border-radius:8px;
+      padding:5px 8px;margin-bottom:6px;display:none;z-index:2147483647;
     `;
-    speedSel.onchange = e => {
+
+    speedBtn.onclick = (e) => {
+      e.stopPropagation();
+      const isHidden = speedMenu.style.display === "none";
+      speedMenu.style.display = isHidden ? "block" : "none";
+      if (isHidden) speedMenu.focus();
+    };
+
+    speedMenu.onchange = (e) => {
       const vid = getMainVideo();
       if (vid) vid.playbackRate = +e.target.value;
+      speedBtn.textContent = e.target.value + "x";
+      speedMenu.style.display = "none";
     };
-    speedBox.appendChild(speedSel);
-    domCache.speedSelect = speedSel;
+
+    // 点击其他地方关闭菜单
+    document.addEventListener('click', (e) => {
+      if (!speedWrap.contains(e.target)) speedMenu.style.display = "none";
+    });
+
+    speedWrap.append(speedBtn, speedMenu);
+    domCache.speedBtn = speedBtn;
+    domCache.speedSelect = speedMenu;
 
     // 播放/暂停按钮
     const playPauseBtn = document.createElement("button");
@@ -238,7 +270,37 @@
       }
     };
 
-    controlWrap.append(speedBox, playPauseBtn);
+    controlWrap.append(speedWrap, playPauseBtn);
+
+    // 持续前进按钮 》
+    forwardButton = document.createElement("button");
+    forwardButton.id = "forward-hold-btn";
+    forwardButton.textContent = "》";
+    forwardButton.style.cssText = `
+      border:none;border-radius:8px;background:${CONFIG.accentColor};
+      color:${CONFIG.textColor};padding:6px 12px;cursor:pointer;font-size:16px;transition:0.16s;flex-shrink:0;
+    `;
+    forwardButton.onclick = () => {
+      const vid = getMainVideo();
+      if (!vid) return;
+      if (!forwardHoldActive) {
+        forwardOriginRate = vid.playbackRate;
+        vid.playbackRate = 2;
+        forwardHoldTimer = setInterval(() => adjustMainVideoTime(10), 200);
+        forwardHoldActive = true;
+        forwardButton.style.background = CONFIG.textColor;
+        forwardButton.style.color = CONFIG.accentColor;
+      } else {
+        clearInterval(forwardHoldTimer);
+        forwardHoldTimer = null;
+        vid.playbackRate = forwardOriginRate;
+        forwardHoldActive = false;
+        forwardButton.style.background = CONFIG.accentColor;
+        forwardButton.style.color = CONFIG.textColor;
+      }
+    };
+
+    controlWrap.appendChild(forwardButton);
 
     // 第二行：进度条
     const progressWrap = document.createElement("div");
@@ -342,7 +404,13 @@
 
     // DOM保护（保存引用以便 destroy 时清理）
     controllerObserver = new MutationObserver(() => {
-      if (!document.body.contains(controller)) document.body.appendChild(controller);
+      if (!document.body.contains(controller)) {
+        document.body.appendChild(controller);
+        // 恢复原有状态，不重置透明度、pointerEvents 等
+        controller.style.opacity = isEnabled ? "1" : "0";
+        controller.style.transform = isEnabled ? "translateX(-50%) translateY(0)" : "translateX(-50%) translateY(20px)";
+        controller.style.pointerEvents = isEnabled ? "auto" : "none";
+      }
     });
     controllerObserver.observe(document.body, { childList: true, subtree: true });
   }
@@ -398,53 +466,11 @@
     `;
 
     const jumpOnce = () => adjustMainVideoTime(stepSec);
-    let isLongPress = false;
-    let holdDelayTimer = null;
-    let holdIntervalTimer = null;
-    let btnOriginPlayRate = 1; // 按钮级别存储原始倍速
 
-    const holdStart = (e) => {
-      const vid = getMainVideo();
-      if (!vid) return;
-      // 延迟启动长按，给短按点击留出时间窗口
-      holdDelayTimer = setTimeout(() => {
-        isLongPress = true;
-        e.preventDefault();
-        btnOriginPlayRate = vid.playbackRate;
-        vid.playbackRate = CONFIG.holdSpeed;
-        holdIntervalTimer = setInterval(() => adjustMainVideoTime(stepSec), 200);
-        holdTimers.set(btn, holdIntervalTimer);
-      }, 300);
-    };
-    const holdStop = () => {
-      if (holdDelayTimer) {
-        clearTimeout(holdDelayTimer);
-        holdDelayTimer = null;
-      }
-      if (holdIntervalTimer) {
-        clearInterval(holdIntervalTimer);
-        holdTimers.delete(btn);
-        holdIntervalTimer = null;
-      }
-      if (isLongPress) {
-        const vid = getMainVideo();
-        if (vid) vid.playbackRate = btnOriginPlayRate;
-        isLongPress = false;
-      }
-    };
-    const onContext = (e) => e.preventDefault();
-
-    btn.addEventListener('mousedown', holdStart);
-    btn.addEventListener('touchstart', holdStart, { passive: false });
-    btn.addEventListener('mouseup', holdStop);
-    btn.addEventListener('mouseleave', holdStop);
-    btn.addEventListener('touchend', holdStop);
-    btn.addEventListener('touchcancel', holdStop);
     btn.addEventListener('click', jumpOnce);
-    btn.addEventListener('contextmenu', onContext);
 
     // 按压动画
-    const pressDown = (e) => { btn.style.transform = "scale(0.96)"; };
+    const pressDown = () => { btn.style.transform = "scale(0.96)"; };
     const pressUp = () => btn.style.transform = "scale(1)";
     btn.addEventListener('mousedown', pressDown);
     btn.addEventListener('touchstart', pressDown, { passive: false });
@@ -487,6 +513,7 @@
     domCache.progressCurrentTime = document.getElementById("progress-current-time");
     domCache.progressTotalTime = document.getElementById("progress-total-time");
     domCache.progressBarContainer = document.getElementById("progress-bar-container");
+    domCache.speedBtn = document.getElementById("speed-btn");
     domCache.speedSelect = document.getElementById("speed-select");
   }
 
@@ -498,6 +525,7 @@
       progressCurrentTime: null,
       progressTotalTime: null,
       progressBarContainer: null,
+      speedBtn: null,
       speedSelect: null
     };
   }
@@ -550,11 +578,17 @@
       domCache.playPauseBtn.textContent = vid.paused ? "▶" : "⏸";
     }
     
-    // 同步倍速下拉选择
+    // 同步倍速按钮文本
+    if (domCache.speedBtn) {
+      const rate = vid.playbackRate;
+      const rateText = rate + "x";
+      if (domCache.speedBtn.textContent !== rateText) {
+        domCache.speedBtn.textContent = rateText;
+      }
+    }
     if (domCache.speedSelect) {
       const rate = vid.playbackRate;
       if (Math.abs(+domCache.speedSelect.value - rate) > 0.01) {
-        // 找到最接近的选项
         const closest = Array.from(domCache.speedSelect.options).reduce((a, b) =>
           Math.abs(+a.value - rate) < Math.abs(+b.value - rate) ? a : b
         );
@@ -575,7 +609,7 @@
   function autoHideWhenNoVideo() {
     const vid = getMainVideo();
     if (toggleButton) toggleButton.style.display = vid ? "flex" : "none";
-    if (controller && !vid) {
+    if (controller && !vid && !isEnabled) {
       controller.style.opacity = "0";
       controller.style.pointerEvents = "none";
     }
@@ -593,12 +627,12 @@
     }
     videoPlayHandler = null;
     videoPauseHandler = null;
-    // 清理长按定时器（包括 setTimeout 和 setInterval）
-    for (const timer of holdTimers.values()) {
-      clearTimeout(timer);
-      clearInterval(timer);
+    // 清理持续前进定时器
+    if (forwardHoldTimer) {
+      clearInterval(forwardHoldTimer);
+      forwardHoldTimer = null;
     }
-    holdTimers.clear();
+    forwardHoldActive = false;
     // 清理进度条全局事件监听器
     if (progressMousemoveHandler) document.removeEventListener('mousemove', progressMousemoveHandler);
     if (progressTouchmoveHandler) document.removeEventListener('touchmove', progressTouchmoveHandler);
@@ -630,6 +664,7 @@
       progressCurrentTime: null,
       progressTotalTime: null,
       progressBarContainer: null,
+      speedBtn: null,
       speedSelect: null
     };
     mainVideoCache = null;
