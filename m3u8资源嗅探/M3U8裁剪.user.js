@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         M3U8裁剪‑手动版(Via专用，搭配1DM)
+// @name         M3U8裁剪
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  多时间段筛选+自动生成正则；支持反向匹配多余URL，搭配1DM使用
+// @version      1.6
+// @description  多时间段筛选+自动生成正则
 // @match        http://*/*
 // @match        https://*/*
 // @grant        GM_setClipboard
@@ -63,9 +63,9 @@
             // 短位段：min 到 10^n-1
             const shortMax = Math.pow(10, minStr.length) - 1;
             parts.push(buildSameLengthRegex(minStr, String(shortMax)));
-            // 中间全通配段
+            // 中间全通配段（首位不能为0）
             for (let len = minStr.length + 1; len < maxStr.length; len++) {
-                parts.push('\\d'.repeat(len - 1) + '[1-9]');
+                parts.push('[1-9]' + '\\d'.repeat(len - 1));
             }
             // 长位段：10^(n-1) 到 max
             const longMin = Math.pow(10, maxStr.length - 1);
@@ -143,12 +143,25 @@
         let extInf = 0;
         let currentKeyLine = null;
         let mapLine = null;
+        let targetDuration = 10;
+        let hasDiscontinuity = false;
         const lines = text.split("\n");
         for (const raw of lines) {
             const line = raw.trim();
             if (!line) continue;
-            if (line.startsWith("#EXT‑X‑KEY")) { currentKeyLine = line; continue; }
-            if (line.startsWith("#EXT‑X‑MAP")) { mapLine = line; continue; }
+            if (line.startsWith("#EXT-X-TARGETDURATION")) {
+                targetDuration = parseInt(line.split(":")[1]) || 10;
+                continue;
+            }
+            if (line.startsWith("#EXT-X-KEY")) { currentKeyLine = line; continue; }
+            if (line.startsWith("#EXT-X-MAP")) { mapLine = line; continue; }
+            if (line.startsWith("#EXT-X-DISCONTINUITY")) {
+                hasDiscontinuity = true;
+                if (segList.length > 0) {
+                    segList[segList.length - 1].discontinuity = true;
+                }
+                continue;
+            }
             const infMatch = line.match(/#EXTINF:([\d\.]+)/);
             if (infMatch) {
                 extInf = parseFloat(infMatch[1]);
@@ -161,12 +174,13 @@
                     end: currentTime + extInf,
                     dur: extInf,
                     url: tsUrl,
-                    keyLine: currentKeyLine
+                    keyLine: currentKeyLine,
+                    discontinuity: false
                 });
                 currentTime += extInf;
             }
         }
-        return { segList, keyLine: currentKeyLine, mapLine };
+        return { segList, keyLine: currentKeyLine, mapLine, targetDuration, hasDiscontinuity };
     }
 
     //多时间段筛选分片
@@ -188,8 +202,9 @@
     }
 
     //生成裁剪后的m3u8内容（接收已筛选的分片列表）
-    function buildClipM3u8(segList, keyLine, mapLine) {
-        let out = "#EXTM3U\n#EXT‑X‑VERSION:3\n";
+    function buildClipM3u8(segList, keyLine, mapLine, targetDuration) {
+        let out = "#EXTM3U\n#EXT-X-VERSION:3\n";
+        if (targetDuration) out += `#EXT-X-TARGETDURATION:${targetDuration}\n`;
         if (mapLine) out += mapLine + "\n";
         let lastKey = null;
         segList.forEach(s => {
@@ -197,44 +212,46 @@
                 if (s.keyLine) out += s.keyLine + "\n";
                 lastKey = s.keyLine;
             }
+            if (s.discontinuity) {
+                out += "#EXT-X-DISCONTINUITY\n";
+            }
             out += `#EXTINF:${s.dur},\n${s.url}\n`;
         });
-        out += "#EXT‑X‑ENDLIST\n";
+        out += "#EXT-X-ENDLIST\n";
         return { content: out, count: segList.length };
     }
 
-    //从分片列表生成正则（按时间段分别生成再拼接）
+    //从分片列表生成正则（按时间段分别取首尾序号，生成范围正则再用|拼接）
     function generateRegexFromSegList(segList, ranges) {
         if (segList.length === 0) return null;
 
-        const fileNames = segList.map(s => {
-            const url = new URL(s.url);
+        function getFileName(seg) {
+            const url = new URL(seg.url);
             const parts = url.pathname.split('/').filter(Boolean);
             const fullName = parts[parts.length - 1];
             const dotIdx = fullName.lastIndexOf('.');
             return dotIdx === -1 ? fullName : fullName.substring(0, dotIdx);
-        });
-
-        const isNumeric = fileNames.every(f => /^\d+$/.test(f));
-
-        if (isNumeric) {
-            const rangeParts = [];
-            for (const range of ranges) {
-                const rangeSegs = segList.filter(s => s.end >= range.start && s.start <= range.end);
-                if (rangeSegs.length === 0) continue;
-                const nums = rangeSegs.map(s => Number(fileNames[segList.indexOf(s)]));
-                const merged = mergeContinuousRanges(nums);
-                const rangeRegexes = merged.map(([min, max]) => {
-                    if (min === max) return String(min);
-                    return buildNumericRangeRegex(min, max);
-                });
-                rangeParts.push(`(?:${rangeRegexes.join('|')})`);
-            }
-            return rangeParts.length > 0 ? rangeParts.join('|') : null;
-        } else {
-            const nameRegex = fileNames.map(escapeRegex).join('|');
-            return `(?:${nameRegex})`;
         }
+
+        const rangeParts = [];
+        for (const range of ranges) {
+            const rangeSegs = segList.filter(s => s.end >= range.start && s.start <= range.end);
+            if (rangeSegs.length === 0) continue;
+
+            const firstFile = getFileName(rangeSegs[0]);
+            const lastFile = getFileName(rangeSegs[rangeSegs.length - 1]);
+            const isNumeric = /^\d+$/.test(firstFile) && /^\d+$/.test(lastFile);
+
+            if (isNumeric) {
+                const min = Number(firstFile);
+                const max = Number(lastFile);
+                rangeParts.push(buildNumericRangeRegex(min, max));
+            } else {
+                const names = rangeSegs.map(getFileName).map(escapeRegex);
+                rangeParts.push(`(?:${names.join('|')})`);
+            }
+        }
+        return rangeParts.length > 0 ? rangeParts.join('|') : null;
     }
 
     //下载本地文件
@@ -273,8 +290,12 @@
 <div style="margin-bottom:6px;">
   <input id="m3u8Input" placeholder="粘贴m3u8链接..." style="width:100%;box-sizing:border-box;padding:5px;border-radius:4px;border:1px solid #555;background:#222;color:#fff;">
 </div>
+<div style="margin-bottom:6px;">
+  <textarea id="m3u8Text" rows="4" placeholder="或直接粘贴m3u8文本内容..." style="width:100%;box-sizing:border-box;padding:5px;border-radius:4px;border:1px solid #555;background:#222;color:#fff;font-family:monospace;font-size:10px;resize:vertical;"></textarea>
+</div>
 <div style="display:flex;gap:4px;margin-bottom:8px;">
-  <button id="btnParse" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;">解析M3U8</button>
+  <button id="btnParse" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;">解析链接</button>
+  <button id="btnParseText" style="flex:1;padding:5px;background:#2a7;border:none;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;">解析文本</button>
 </div>
 
 <div id="statArea" style="display:none;margin-bottom:8px;padding:6px;background:#1a1a2a;border-radius:6px;font-size:11px;color:#acf;"></div>
@@ -297,10 +318,6 @@
 <div id="regexArea" style="display:none;border-top:1px solid #333;padding-top:8px;margin-bottom:8px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
     <span style="color:#6ef;font-weight:bold;font-size:11px;">🔍 正则表达式</span>
-    <label style="font-size:11px;color:#f9c;cursor:pointer;">
-      <input type="checkbox" id="chkReverse" style="vertical-align:middle;">
-      反向匹配（排除选中）
-    </label>
   </div>
   <textarea id="regexOutput" rows="3" style="width:100%;box-sizing:border-box;padding:5px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;" placeholder="点击『生成正则』后显示..."></textarea>
   <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;">
@@ -323,16 +340,17 @@
 
         const $ = sel => panel.querySelector(sel);
         const m3u8Input = $("#m3u8Input");
+        const m3u8Text = $("#m3u8Text");
         const statArea = $("#statArea");
         const timeRangeList = $("#timeRangeList");
         const btnAddRange = $("#btnAddRange");
         const btnParse = $("#btnParse");
+        const btnParseText = $("#btnParseText");
         const btnPreview = $("#btnPreview");
         const btnGenRegex = $("#btnGenRegex");
         const filterInfo = $("#filterInfo");
         const regexArea = $("#regexArea");
         const regexOutput = $("#regexOutput");
-        const chkReverse = $("#chkReverse");
         const btnCopyRegex = $("#btnCopyRegex");
         const btnCopyUrls = $("#btnCopyUrls");
         const btnGenClip = $("#btnGenClip");
@@ -411,6 +429,46 @@
         };
 
         let mapLineCache = null;
+        let targetDurationCache = 10;
+
+        function doParse(txt, baseUrl, sourceType) {
+            const { segList, keyLine, mapLine, targetDuration, hasDiscontinuity } = parseM3u8(txt, baseUrl);
+            rawSegList = segList;
+            keyLineCache = keyLine;
+            mapLineCache = mapLine;
+            targetDurationCache = targetDuration;
+            filteredSegList = segList;
+            const totalDur = segList.reduce((sum, s) => sum + s.dur, 0);
+            const avgDur = segList.length > 0 ? (totalDur / segList.length) : 0;
+            let extraInfo = '';
+            if (mapLine) extraInfo += ' | fMP4流';
+            if (hasDiscontinuity) extraInfo += ' | 含不连续标记';
+            statArea.style.display = 'block';
+            statArea.innerHTML = `✅ 解析完成（${sourceType}）<br>总分片：<b style="color:#fff">${segList.length}</b> 个 | 总时长：<b style="color:#fff">${secToTime(totalDur)}</b><br>平均分片：<b style="color:#fff">${avgDur.toFixed(1)}s</b> | TARGETDURATION: ${targetDuration}${extraInfo}`;
+            showMsg("✅ 解析成功，请设置时间段", '#8f8');
+            filterInfo.style.display = 'none';
+            regexArea.style.display = 'none';
+        }
+
+        btnParse.onclick = async () => {
+            const url = m3u8Input.value.trim();
+            if (!url) { showMsg("⚠️ 请填入m3u8链接"); return; }
+            showMsg("⏳ 请求m3u8...", '#fc6');
+            try {
+                const res = await fetch(url, { credentials: "omit" });
+                const txt = await res.text();
+                doParse(txt, url, '链接');
+            } catch (err) {
+                showMsg(`❌ 跨域/链接失效：${err.message}，请尝试粘贴文本解析`, '#f66');
+            }
+        };
+
+        btnParseText.onclick = () => {
+            const txt = m3u8Text.value.trim();
+            if (!txt) { showMsg("⚠️ 请粘贴m3u8文本内容"); return; }
+            const url = m3u8Input.value.trim() || 'http://localhost/';
+            doParse(txt, url, '文本');
+        };
 
         function syncFilter() {
             if (rawSegList.length === 0) return false;
@@ -422,30 +480,6 @@
             filterInfo.innerText = `🎯 筛选后：${filteredSegList.length} 个分片 | 总时长：${secToTime(totalDur)}`;
             return true;
         }
-
-        btnParse.onclick = async () => {
-            const url = m3u8Input.value.trim();
-            if (!url) { showMsg("⚠️ 请填入m3u8链接"); return; }
-            showMsg("⏳ 请求m3u8...", '#fc6');
-            try {
-                const res = await fetch(url, { credentials: "omit" });
-                const txt = await res.text();
-                const { segList, keyLine, mapLine } = parseM3u8(txt, url);
-                rawSegList = segList;
-                keyLineCache = keyLine;
-                mapLineCache = mapLine;
-                filteredSegList = segList;
-                const totalDur = segList.reduce((sum, s) => sum + s.dur, 0);
-                const avgDur = segList.length > 0 ? (totalDur / segList.length) : 0;
-                statArea.style.display = 'block';
-                statArea.innerHTML = `✅ 解析完成<br>总分片：<b style="color:#fff">${segList.length}</b> 个 | 总时长：<b style="color:#fff">${secToTime(totalDur)}</b><br>平均分片：<b style="color:#fff">${avgDur.toFixed(1)}s</b> ${mapLine ? '| fMP4流' : ''}`;
-                showMsg("✅ 解析成功，请设置时间段", '#8f8');
-                filterInfo.style.display = 'none';
-                regexArea.style.display = 'none';
-            } catch (err) {
-                showMsg(`❌ 跨域/链接失效：${err.message}`, '#f66');
-            }
-        };
 
         btnPreview.onclick = () => {
             if (rawSegList.length === 0) { showMsg("⚠️ 请先解析M3U8"); return; }
@@ -470,13 +504,6 @@
             showMsg("✅ 正则生成成功", '#8f8');
         };
 
-        chkReverse.onchange = () => {
-            if (filteredSegList.length > 0) {
-                const regex = generateRegexFromSegList(filteredSegList, timeRanges);
-                if (regex) regexOutput.value = regex;
-            }
-        };
-
         btnCopyRegex.onclick = () => {
             const val = regexOutput.value.trim();
             if (!val) { showMsg("⚠️ 正则为空"); return; }
@@ -498,7 +525,7 @@
             if (rawSegList.length === 0) { showMsg("⚠️ 请先解析M3U8"); return; }
             if (!syncFilter()) return;
             if (filteredSegList.length === 0) { showMsg("⚠️ 筛选结果为空，请调整时间段", '#f66'); return; }
-            const result = buildClipM3u8(filteredSegList, keyLineCache, mapLineCache);
+            const result = buildClipM3u8(filteredSegList, keyLineCache, mapLineCache, targetDurationCache);
             clipContent = result.content;
             showMsg(`✅ 裁剪M3U8已生成（${result.count}个分片）`, '#8f8');
         };

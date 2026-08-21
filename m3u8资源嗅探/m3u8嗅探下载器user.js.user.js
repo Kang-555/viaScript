@@ -1,13 +1,12 @@
 // ==UserScript==
-// @name         视频嗅探下载器
+// @name         m3u8嗅探下载器
 // @namespace    http://tampermonkey.net/
 // @version      2.3
-// @description  网页m3u8/mp4视频嗅探下载；m3u8分片ZIP打包+本地m3u8索引；AES‑128解密；适配Via/Kiwi手机浏览器
+// @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
 // @match        *://*/*
 // @connect      *
-// @require      https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -244,59 +243,8 @@
         return title.replace(/[\\/:*?"<>|]/g, " ").trim();
     };
 
-    const openTsPreviewPage = (tsList, encryptInfo, originM3u8Url, totalDuration) => {
-        const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>M3U8预览 - ${getSafeFileName()}</title>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{padding:16px;font-family:system-ui;font-size:14px;background:#1a1a2e;color:#eee}
-h2{margin-bottom:12px;color:#4caf50}
-.player-box{background:#16213e;border-radius:8px;padding:12px;margin-bottom:16px}
-video{width:100%;max-height:420px;background:#000;border-radius:4px}
-.info{background:#16213e;border-radius:8px;padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.info p{margin:4px 0;word-break:break-all}
-.label{color:#888}
-.value{color:#4caf50;font-weight:bold}
-.encrypt-yes{color:#ff6b6b}
-.encrypt-no{color:#4caf50}
-a{color:#2196F3}
-</style></head><body>
-<h2>M3U8 预览</h2>
-<div class="player-box">
-<video id="player" controls></video>
-</div>
-<div class="info">
-<div><span class="label">原始地址：</span><br><a target="_blank" href="${originM3u8Url}">${originM3u8Url}</a></div>
-<div><span class="label">加密状态：</span><br>${encryptInfo.enable ? '<span class="encrypt-yes">AES-128加密</span>' : '<span class="encrypt-no">未加密</span>'}</div>
-<div><span class="label">分片总数：</span><br><span class="value">${tsList.length}</span></div>
-<div><span class="label">总时长：</span><br><span class="value">${totalDuration.toFixed(1)} 秒</span></div>
-</div>
-<script>
-const video = document.getElementById('player');
-let currentHls = null;
-function loadVideo(url){
-  if(currentHls){ currentHls.destroy(); currentHls = null; }
-  if(Hls.isSupported()){
-    currentHls = new Hls();
-    currentHls.loadSource(url);
-    currentHls.attachMedia(video);
-    currentHls.on(Hls.Events.MANIFEST_PARSED, ()=> video.play().catch(()=>{}));
-  } else if(video.canPlayType('application/vnd.apple.mpegurl')){
-    video.src = url;
-    video.play().catch(()=>{});
-  }
-}
-loadVideo('${originM3u8Url}');
-<\/script>
-</body></html>`;
-        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-        const previewUrl = URL.createObjectURL(blob);
-        window.open(previewUrl, '_blank');
-    };
-
     // ==========================================
-    // 5. 事件总线【修复事件名，全部改为普通英文减号】
+    // 5. 事件总线
     // ==========================================
     const Bus = {
         events: {},
@@ -400,31 +348,23 @@ loadVideo('${originM3u8Url}');
     // ==========================================
     class VideoWriter {
         constructor() {
-            this.zip = new JSZip();
-            this.fileCount = 0;
-            this.tsFileCount = 0;
+            this.buffers = [];
+            this.totalSize = 0;
         }
 
         async addFile(name, data) {
-            const isText = typeof data === 'string';
-            const isTs = /\.ts$/i.test(name);
-            const compressionOptions = isText ? { compression: 'DEFLATE', compressionOptions: { level: 9 } } : null;
-            this.zip.file(name, data, compressionOptions);
-            this.fileCount++;
-            if (isTs) this.tsFileCount++;
+            const uint8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+            this.buffers.push(uint8);
+            this.totalSize += uint8.length;
         }
 
         async close(filename) {
-            if (this.fileCount === 0) {
+            if (this.buffers.length === 0) {
                 alert('下载失败：获取分片数据为空');
                 return;
             }
-            const zipBlob = await this.zip.generateAsync({
-                type: 'blob',
-                compression: 'DEFLATE',
-                compressionOptions: { level: 1 }
-            });
-            Utils.downloadBlob(zipBlob, filename.replace(/\.ts$/i, '.zip'));
+            const tsBlob = new Blob(this.buffers, { type: 'video/mp2t' });
+            Utils.downloadBlob(tsBlob, filename.replace(/\.zip$/i, '.ts'));
         }
     }
 
@@ -523,25 +463,6 @@ loadVideo('${originM3u8Url}');
             }
         }
         return {startIdx, endIdx};
-    };
-
-    /**
-     * 生成本地播放用 m3u8 索引（HLS 标准格式）
-     */
-    const buildLocalM3u8 = (segResults, targetDuration = 10, keyInfo = null) => {
-        const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
-        const maxDur = Math.max(...segResults.map(r => r.dur || targetDuration));
-        lines.push(`#EXT-X-TARGETDURATION:${Math.ceil(maxDur)}`);
-        lines.push('#EXT-X-MEDIA-SEQUENCE:0');
-        if (keyInfo && keyInfo.localName) {
-            lines.push(`#EXT-X-KEY:METHOD=AES-128,URI="${keyInfo.localName}"`);
-        }
-        for (const r of segResults) {
-            lines.push(`#EXTINF:${(r.dur || targetDuration).toFixed(3)},`);
-            lines.push(r.fileName);
-        }
-        lines.push('#EXT-X-ENDLIST');
-        return lines.join('\n');
     };
 
     const downloadM3u8BySegments = async (segments, keyCache, onProgress, writer, startIdx = null, endIdx = null) => {
@@ -648,9 +569,8 @@ loadVideo('${originM3u8Url}');
         const segResults = [];
         for (let i = 0; i < results.length; i++) {
             if (results[i] && results[i].length > 0) {
-                const fileName = `${i.toString().padStart(4, '0')}.ts`;
-                await writer.addFile(fileName, results[i]);
-                segResults.push({ fileName, dur: workSegments[i].dur, seq: workSegments[i].seq });
+                await writer.addFile('', results[i]);
+                segResults.push({ dur: workSegments[i].dur, seq: workSegments[i].seq });
             } else {
                 console.warn(`[downloadM3u8BySegments] 跳过空分片#${i}`);
             }
@@ -715,7 +635,7 @@ loadVideo('${originM3u8Url}');
     window.TaskRunner = async (url, type, btn, opt = {}) => {
         const originalText = btn ? btn.textContent : '';
         const safeName = getSafeFileName();
-        let filename = type === 'm3u8' ? safeName + '.zip' : safeName + '.mp4';
+        let filename = type === 'm3u8' ? safeName + '.ts' : safeName + '.mp4';
         console.log('[TaskRunner] 开始:', { url, type, opt });
 
         const writer = new VideoWriter();
@@ -740,41 +660,33 @@ loadVideo('${originM3u8Url}');
 
                 const keyCache = new Map();
                 const uniqueKeys = [...new Set(segments.filter(s => s.key).map(s => s.key))];
-                let keyInfoForPlaylist = null;
                 if (uniqueKeys.length > 0) {
                     if (btn) btn.textContent = '获取加密密钥...';
                     for (const keyUrl of uniqueKeys) {
                         const keyData = await Utils.request(keyUrl, true);
                         keyCache.set(keyUrl, new Uint8Array(keyData));
-                        if (!keyInfoForPlaylist) {
-                            keyInfoForPlaylist = { uri: keyUrl, localName: 'enc.key', data: new Uint8Array(keyData) };
-                        }
                     }
                 }
                 console.log('[TaskRunner] 开始下载分片');
-                const segResults = await downloadM3u8BySegments(segments, keyCache, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer, startIdx, endIdx);
-                console.log('[TaskRunner] 分片下载完成, 共', segResults.length, '个');
-                if (keyInfoForPlaylist) {
-                    await writer.addFile(keyInfoForPlaylist.localName, keyInfoForPlaylist.data);
-                }
-                await writer.addFile('playlist.m3u8', buildLocalM3u8(segResults, targetDuration, keyInfoForPlaylist));
+                await downloadM3u8BySegments(segments, keyCache, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer, startIdx, endIdx);
+                console.log('[TaskRunner] 分片下载完成');
                 if (btn) btn.textContent = '保存中...';
-                console.log('[TaskRunner] 生成ZIP:', filename);
+                console.log('[TaskRunner] 生成TS文件:', filename);
                 await writer.close(filename);
-                console.log('[TaskRunner] ZIP生成完成');
+                console.log('[TaskRunner] TS文件生成完成');
                 if (btn) btn.textContent = '完成';
             } else {
                 if (btn) btn.textContent = '下载中...';
                 const dlResult = await downloadMp4(url, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer);
                 if (dlResult.nativeDl) {
-                    console.log('[TaskRunner] 原生下载已触发，跳过ZIP打包');
+                    console.log('[TaskRunner] 原生下载已触发，跳过打包');
                     if (btn) btn.textContent = '原生下载已启动';
                     return;
                 }
                 if (btn) btn.textContent = '保存中...';
-                console.log('[TaskRunner] 生成ZIP:', filename);
+                console.log('[TaskRunner] 生成TS文件:', filename);
                 await writer.close(filename);
-                console.log('[TaskRunner] ZIP生成完成');
+                console.log('[TaskRunner] TS文件生成完成');
                 if (btn) btn.textContent = '完成';
             }
         } catch (error) {
@@ -933,16 +845,7 @@ loadVideo('${originM3u8Url}');
         }
 
         async previewM3u8(url) {
-            try {
-                const res = await parseM3u8(url);
-                openTsPreviewPage(res.segments, {
-                    enable: res.segments.some(s => s.key),
-                    keyUrl: res.segments.find(s => s.key)?.key || null,
-                    ivHex: null
-                }, url, res.totalDuration);
-            } catch (err) {
-                alert('解析失败: ' + err.message);
-            }
+            alert('预览功能已移除');
         }
 
         collectM3u8Opt(item, body) {
@@ -1075,12 +978,9 @@ loadVideo('${originM3u8Url}');
                         const btnRow = Utils.createElement('div', { class: 'btn-row' });
                         const mainBtn = Utils.createElement('button', { class: 'btn-primary' }, '开始下载');
                         mainBtn.onclick = () => this.runDownload(item, bodyEl, mainBtn);
-                        const previewBtn = Utils.createElement('button', { class: 'btn-secondary' }, '预览');
-                        previewBtn.onclick = (e) => { e.stopPropagation(); this.previewM3u8(item.url); };
                         const copyBtn = Utils.createElement('button', { class: 'btn-copy' }, '复制');
                         copyBtn.onclick = (e) => { e.stopPropagation(); this.copyUrl(item.url); };
                         btnRow.appendChild(mainBtn);
-                        btnRow.appendChild(previewBtn);
                         btnRow.appendChild(copyBtn);
                         bodyEl.appendChild(btnRow);
                     } else {
