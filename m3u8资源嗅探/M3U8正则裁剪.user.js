@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8正则裁剪
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      2.0
 // @description  多时间段筛选+自动生成正则
 // @match        http://*/*
 // @match        https://*/*
@@ -189,38 +189,70 @@
         panel.innerHTML = `
 <div class="m3u8-header">🎬 M3U8正则裁剪</div>
 
-<div class="m3u8-section">
-  <div class="m3u8-section-title">🔗 M3U8链接</div>
-  <div class="m3u8-input-row">
-    <input id="m3u8Input" placeholder="粘贴m3u8链接...">
-    <button id="btnParse" class="btn btn-primary">解析</button>
-  </div>
-  <div id="statInfo" class="m3u8-stat" style="display:none"></div>
+<div class="m3u8-tabs">
+  <button class="tab-btn active" data-tab="link">🔗 M3U8链接</button>
+  <button class="tab-btn" data-tab="range">⏱ 时间段筛选</button>
+  <button class="tab-btn" data-tab="regex">🔍 正则</button>
 </div>
 
-<div class="m3u8-section">
-  <div class="m3u8-section-title">
-    ⏱ 时间段筛选
-    <button class="btn btn-add" id="btnAddRange">➕ 添加</button>
+<div class="m3u8-tab-content" data-tab="link">
+  <div class="m3u8-section">
+    <div class="m3u8-input-row">
+      <input id="m3u8Input" placeholder="粘贴m3u8链接...">
+      <button id="btnParse" class="btn btn-primary">解析</button>
+    </div>
+    <div id="statInfo" class="m3u8-stat" style="display:none"></div>
   </div>
-  <div id="timeRangeList"></div>
 </div>
 
-<div class="m3u8-section">
-  <div class="m3u8-section-title">📊 筛选结果</div>
-  <div class="m3u8-btn-row">
-    <button class="btn btn-preview" id="btnPreview">预览筛选</button>
-    <button class="btn btn-generate" id="btnGenRegex">生成正则</button>
+<div class="m3u8-tab-content" data-tab="range" style="display:none">
+  <div class="m3u8-section">
+    <div class="dual-range">
+      <div class="range-group">
+        <div class="range-group-header">
+          <span class="range-label">起始</span>
+          <span class="range-time-edit" id="startTimeEdit">00:00:00</span>
+        </div>
+        <div class="video-track" id="startTrack">
+          <div class="video-progress" id="startProgress"></div>
+          <div class="video-thumb" id="startThumb"></div>
+        </div>
+      </div>
+      <div class="range-group">
+        <div class="range-group-header">
+          <span class="range-label">结束</span>
+          <span class="range-time-edit" id="endTimeEdit">00:01:00</span>
+        </div>
+        <div class="video-track" id="endTrack">
+          <div class="video-progress" id="endProgress"></div>
+          <div class="video-thumb" id="endThumb"></div>
+        </div>
+      </div>
+    </div>
+    <div class="video-time-row">
+      <span class="video-time-total">总时长: <span id="totalTime">00:00:00</span></span>
+    </div>
+    <button class="btn btn-add" id="btnAddRange">➕ 添加到列表</button>
+    <div id="timeRangeList" class="time-range-list" style="display:none"></div>
+    <div id="timeRangeEmpty" class="time-range-empty">暂无时间段，点击上方按钮添加</div>
   </div>
-  <div id="filterInfo" class="m3u8-filter-info" style="display:none"></div>
 </div>
 
-<div class="m3u8-section" id="regexSection" style="display:none">
-  <div class="m3u8-section-title">🔍 正则表达式</div>
-  <textarea id="regexOutput" rows="4" placeholder="点击『生成正则』后显示..."></textarea>
-  <div class="m3u8-btn-row">
-    <button class="btn btn-generate" id="btnCopyRegex">复制正则</button>
-    <button class="btn btn-copy" id="btnCopyUrls">复制匹配URL</button>
+<div class="m3u8-tab-content" data-tab="regex" style="display:none">
+  <div class="m3u8-section">
+    <div class="m3u8-btn-row">
+      <button class="btn btn-preview" id="btnPreview">预览筛选</button>
+      <button class="btn btn-generate" id="btnGenRegex">生成正则</button>
+    </div>
+    <div id="filterInfo" class="m3u8-filter-info" style="display:none"></div>
+  </div>
+  <div class="m3u8-section" id="regexSection" style="display:none">
+    <div class="m3u8-section-title">🔍 正则表达式</div>
+    <textarea id="regexOutput" rows="4" placeholder="点击『生成正则』后显示..."></textarea>
+    <div class="m3u8-btn-row">
+      <button class="btn btn-generate" id="btnCopyRegex">复制正则</button>
+      <button class="btn btn-copy" id="btnCopyUrls">复制匹配URL</button>
+    </div>
   </div>
 </div>
 
@@ -230,10 +262,22 @@
         document.body.appendChild(panel);
 
         const $ = sel => panel.querySelector(sel);
+        const tabBtns = panel.querySelectorAll('.tab-btn');
+        const tabContents = panel.querySelectorAll('.m3u8-tab-content');
         const m3u8Input = $('#m3u8Input');
         const btnParse = $('#btnParse');
         const statInfo = $('#statInfo');
+        const startTrack = $('#startTrack');
+        const startProgress = $('#startProgress');
+        const startThumb = $('#startThumb');
+        const endTrack = $('#endTrack');
+        const endProgress = $('#endProgress');
+        const endThumb = $('#endThumb');
+        const startTimeEdit = $('#startTimeEdit');
+        const endTimeEdit = $('#endTimeEdit');
+        const totalTimeEl = $('#totalTime');
         const timeRangeList = $('#timeRangeList');
+        const timeRangeEmpty = $('#timeRangeEmpty');
         const btnAddRange = $('#btnAddRange');
         const btnPreview = $('#btnPreview');
         const btnGenRegex = $('#btnGenRegex');
@@ -244,139 +288,167 @@
         const btnCopyUrls = $('#btnCopyUrls');
         const infoText = $('#infoText');
 
-        let dragging = null;
-
         function showMsg(text, type) {
             infoText.textContent = text;
             infoText.className = 'm3u8-info ' + (type || '');
         }
 
-        function renderTimeRanges() {
-            timeRangeList.innerHTML = timeRanges.map((r, i) => buildTimeRangeRow(r.start, r.end, i)).join('');
+        tabBtns.forEach(btn => {
+            btn.addEventListener('click', function () {
+                tabBtns.forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                const targetTab = this.dataset.tab;
+                tabContents.forEach(tc => {
+                    tc.style.display = tc.dataset.tab === targetTab ? 'block' : 'none';
+                });
+            });
+        });
 
+        function renderTimeRanges() {
+            if (timeRanges.length === 0) {
+                timeRangeList.style.display = 'none';
+                timeRangeEmpty.style.display = 'block';
+                return;
+            }
+            timeRangeEmpty.style.display = 'none';
+            timeRangeList.style.display = 'block';
+            timeRangeList.innerHTML = timeRanges.map((r, i) => buildTimeRangeRow(r.start, r.end, i)).join('');
             timeRangeList.querySelectorAll('.tr-del').forEach(btn => {
                 btn.onclick = () => {
-                    const synced = collectTimeRanges();
-                    if (!synced) return;
                     const idx = parseInt(btn.dataset.idx);
-                    if (timeRanges.length <= 1) {
-                        showMsg('⚠️ 至少保留一个时间段', 'warn');
-                        return;
-                    }
                     timeRanges.splice(idx, 1);
                     renderTimeRanges();
                 };
             });
-
-            timeRangeList.querySelectorAll('.tr-start, .tr-end').forEach(input => {
-                input.addEventListener('input', function () {
-                    const raw = this.value;
-                    const onlyDigits = raw.replace(/\D/g, '').slice(0, 6);
-                    this.value = numToHms(onlyDigits);
-                    this.selectionStart = this.selectionEnd = this.value.length;
-                });
-                input.addEventListener('change', function () {
-                    const synced = collectTimeRanges();
-                    if (!synced) return;
-                    renderTimeRanges();
-                });
-            });
-
-            timeRangeList.querySelectorAll('.tr-bar').forEach(bar => {
-                const barEl = bar;
-                barEl.addEventListener('mousedown', e => {
-                    e.preventDefault();
-                    const rect = barEl.getBoundingClientRect();
-                    dragging = {
-                        bar: barEl,
-                        idx: parseInt(barEl.dataset.idx),
-                        mode: 'move',
-                        offset: (e.clientX - rect.left) / rect.width
-                    };
-                    updateDrag(e);
-                });
-                barEl.addEventListener('mousemove', e => {
-                    if (dragging && dragging.bar === barEl) updateDrag(e);
-                });
-                barEl.addEventListener('mouseup', () => { dragging = null; });
-                barEl.addEventListener('mouseleave', () => { if (dragging && dragging.bar === barEl) dragging = null; });
-
-                barEl.querySelectorAll('.tr-bar-handle').forEach(handle => {
-                    handle.addEventListener('mousedown', e => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        dragging = {
-                            bar: barEl,
-                            idx: parseInt(handle.dataset.idx),
-                            mode: handle.dataset.role,
-                            offset: 0
-                        };
-                    });
-                });
-            });
         }
 
-        function updateDrag(e) {
-            if (!dragging || totalDuration <= 0) return;
-            const rect = dragging.bar.getBoundingClientRect();
+        function updateRangeUI() {
+            const curStart = timeRanges._curStart ?? 0;
+            const curEnd = timeRanges._curEnd ?? Math.min(60, totalDuration);
+            if (totalDuration > 0) {
+                const startPct = (curStart / totalDuration) * 100;
+                startProgress.style.width = startPct + '%';
+                startThumb.style.left = startPct + '%';
+                const endPct = (curEnd / totalDuration) * 100;
+                endProgress.style.width = endPct + '%';
+                endThumb.style.left = endPct + '%';
+            }
+            startTimeEdit.textContent = secToTime(curStart);
+            endTimeEdit.textContent = secToTime(curEnd);
+            totalTimeEl.textContent = secToTime(totalDuration);
+        }
+
+        let startDragging = false;
+        let endDragging = false;
+
+        function handleTrackDrag(e, isStart) {
+            if (totalDuration <= 0) return;
+            const track = isStart ? startTrack : endTrack;
+            const rect = track.getBoundingClientRect();
             const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            const sec = pct * totalDuration;
-            const r = timeRanges[dragging.idx];
-            if (dragging.mode === 'start') {
-                r.start = Math.min(sec, r.end);
-            } else if (dragging.mode === 'end') {
-                r.end = Math.max(sec, r.start);
+            const sec = Math.round(pct * totalDuration);
+            if (isStart) {
+                timeRanges._curStart = sec;
             } else {
-                const len = r.end - r.start;
-                let newStart = sec - len * dragging.offset;
-                newStart = Math.max(0, Math.min(newStart, totalDuration - len));
-                r.start = newStart;
-                r.end = newStart + len;
+                timeRanges._curEnd = sec;
             }
-            renderTimeRanges();
+            updateRangeUI();
         }
 
-        document.addEventListener('mousemove', updateDrag);
-        document.addEventListener('mouseup', () => { dragging = null; });
+        startTrack.addEventListener('mousedown', e => {
+            e.preventDefault();
+            startDragging = true;
+            handleTrackDrag(e, true);
+        });
+        endTrack.addEventListener('mousedown', e => {
+            e.preventDefault();
+            endDragging = true;
+            handleTrackDrag(e, false);
+        });
 
-        function collectTimeRanges() {
-            const rows = timeRangeList.querySelectorAll('.tr-row');
-            const newRanges = [];
-            for (const row of rows) {
-                const idx = parseInt(row.dataset.idx);
-                const startStr = row.querySelector('.tr-start').value.trim();
-                const endStr = row.querySelector('.tr-end').value.trim();
-                let s, e;
-                try {
-                    s = timeToSec(startStr);
-                    e = timeToSec(endStr);
-                } catch {
-                    showMsg(`⚠️ 段${idx + 1} 时间格式错误`, 'error');
-                    return null;
-                }
-                if (s >= e) {
-                    showMsg(`⚠️ 段${idx + 1} 开始时间需早于结束时间`, 'error');
-                    return null;
-                }
-                if (totalDuration > 0) {
-                    s = Math.max(0, Math.min(s, totalDuration));
-                    e = Math.max(0, Math.min(e, totalDuration));
-                }
-                newRanges.push({ start: s, end: e });
+        document.addEventListener('mousemove', e => {
+            if (startDragging) handleTrackDrag(e, true);
+            if (endDragging) handleTrackDrag(e, false);
+        });
+        document.addEventListener('mouseup', () => {
+            startDragging = false;
+            endDragging = false;
+        });
+
+        startTimeEdit.addEventListener('click', function () {
+            if (this.getAttribute('contenteditable') !== 'true') {
+                this.setAttribute('contenteditable', 'true');
+                this.focus();
+                const range = document.createRange();
+                range.selectNodeContents(this);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
             }
-            timeRanges = newRanges;
-            return newRanges;
+        });
+        endTimeEdit.addEventListener('click', function () {
+            if (this.getAttribute('contenteditable') !== 'true') {
+                this.setAttribute('contenteditable', 'true');
+                this.focus();
+                const range = document.createRange();
+                range.selectNodeContents(this);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            }
+        });
+
+        function finishEdit(el, isStart) {
+            el.setAttribute('contenteditable', 'false');
+            const text = el.textContent.trim();
+            try {
+                const sec = timeToSec(text);
+                if (totalDuration > 0 && (sec < 0 || sec > totalDuration)) {
+                    showMsg('⚠️ 时间超出范围', 'error');
+                    updateRangeUI();
+                    return;
+                }
+                if (isStart) {
+                    timeRanges._curStart = sec;
+                } else {
+                    timeRanges._curEnd = sec;
+                }
+                updateRangeUI();
+            } catch {
+                showMsg('⚠️ 时间格式错误，应为 HH:MM:SS', 'error');
+                updateRangeUI();
+            }
         }
+
+        startTimeEdit.addEventListener('blur', function () { finishEdit(this, true); });
+        endTimeEdit.addEventListener('blur', function () { finishEdit(this, false); });
+        startTimeEdit.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); this.blur(); }
+            if (e.key === 'Escape') { updateRangeUI(); this.blur(); }
+        });
+        endTimeEdit.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); this.blur(); }
+            if (e.key === 'Escape') { updateRangeUI(); this.blur(); }
+        });
 
         btnAddRange.onclick = () => {
-            const synced = collectTimeRanges();
-            if (!synced) return;
-            const lastRange = timeRanges[timeRanges.length - 1];
-            timeRanges.push({
-                start: lastRange ? lastRange.end : 0,
-                end: lastRange ? Math.min(lastRange.end + 60, totalDuration) : Math.min(60, totalDuration)
-            });
+            const curStart = timeRanges._curStart ?? 0;
+            const curEnd = timeRanges._curEnd ?? 0;
+            if (totalDuration <= 0) {
+                showMsg('⚠️ 请先解析M3U8', 'warn');
+                return;
+            }
+            if (curEnd <= curStart) {
+                showMsg('⚠️ 结束时间需大于起始时间', 'warn');
+                return;
+            }
+            timeRanges.push({ start: curStart, end: curEnd });
+            timeRanges.sort((a, b) => a.start - b.start);
             renderTimeRanges();
+            timeRanges._curStart = curEnd;
+            timeRanges._curEnd = Math.min(curEnd + 60, totalDuration);
+            showMsg('✅ 已添加到列表', 'success');
+            updateRangeUI();
         };
 
         btnParse.onclick = async () => {
@@ -401,11 +473,15 @@
 <div class="stat-row"><span>总时长</span><b>${secToTime(totalDuration)}</b></div>
 <div class="stat-row"><span>平均分片</span><b>${avgDur.toFixed(2)}s</b></div>
 `;
-                timeRanges = [{ start: 0, end: Math.min(60, totalDuration) }];
+                timeRanges = [];
+                timeRanges._curStart = 0;
+                timeRanges._curEnd = Math.min(60, totalDuration);
+                updateRangeUI();
                 renderTimeRanges();
                 showMsg('✅ 解析完成，请设置时间段', 'success');
                 filterInfo.style.display = 'none';
                 regexSection.style.display = 'none';
+                tabBtns[1].click();
             } catch (err) {
                 showMsg('❌ 跨域或链接失效：' + err.message, 'error');
             }
@@ -416,9 +492,7 @@
                 showMsg('⚠️ 请先解析M3U8', 'warn');
                 return null;
             }
-            const ranges = collectTimeRanges();
-            if (!ranges) return null;
-            const filtered = filterByTimeRanges(rawSegList, ranges);
+            const filtered = filterByTimeRanges(rawSegList, timeRanges);
             const totalDur = filtered.reduce((sum, s) => sum + s.dur, 0);
             filterInfo.style.display = 'block';
             filterInfo.textContent = `🎯 筛选后：${filtered.length} 个分片 | 总时长：${secToTime(totalDur)}`;
@@ -473,115 +547,20 @@
         };
 
         renderTimeRanges();
-
-        panel.querySelectorAll('.toggle-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                panel.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
-                this.classList.add('active');
-                const targetId = this.dataset.target;
-                panel.querySelectorAll('.m3u8-section').forEach(section => {
-                    section.style.display = 'none';
-                });
-                if (targetId) {
-                    const target = panel.querySelector('#' + targetId);
-                    if (target) target.style.display = 'block';
-                }
-            });
-        });
-
-        const startBar = $('#startBar');
-        const endBar = $('#endBar');
-        const startTimeInput = $('#startTime');
-        const endTimeInput = $('#endTime');
-        let timelineDragging = null;
-
-        function updateTimelineUI() {
-            if (totalDuration <= 0) return;
-            const startPct = (timeRanges[0].start / totalDuration) * 100;
-            const endPct = (timeRanges[0].end / totalDuration) * 100;
-            const startFill = $('#startFill');
-            const endFill = $('#endFill');
-            const startHandle = $('#startHandle');
-            const endHandle = $('#endHandle');
-            if (startFill) startFill.style.width = startPct + '%';
-            if (endFill) endFill.style.width = endPct + '%';
-            if (startHandle) startHandle.style.left = startPct + '%';
-            if (endHandle) endHandle.style.left = endPct + '%';
-            if (startTimeInput) startTimeInput.value = secToTime(timeRanges[0].start);
-            if (endTimeInput) endTimeInput.value = secToTime(timeRanges[0].end);
-        }
-
-        function handleTimelineDrag(e, mode) {
-            if (totalDuration <= 0) return;
-            const bar = mode === 'start' ? startBar : endBar;
-            if (!bar) return;
-            const rect = bar.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            const sec = pct * totalDuration;
-            if (mode === 'start') {
-                timeRanges[0].start = Math.min(sec, timeRanges[0].end);
-            } else {
-                timeRanges[0].end = Math.max(sec, timeRanges[0].start);
-            }
-            updateTimelineUI();
-            renderTimeRanges();
-        }
-
-        if (startBar) {
-            startBar.addEventListener('mousedown', e => {
-                e.preventDefault();
-                timelineDragging = 'start';
-                handleTimelineDrag(e, 'start');
-            });
-        }
-        if (endBar) {
-            endBar.addEventListener('mousedown', e => {
-                e.preventDefault();
-                timelineDragging = 'end';
-                handleTimelineDrag(e, 'end');
-            });
-        }
-        document.addEventListener('mousemove', e => {
-            if (timelineDragging) {
-                handleTimelineDrag(e, timelineDragging);
-            }
-        });
-        document.addEventListener('mouseup', () => { timelineDragging = null; });
-
-        if (startTimeInput) {
-            startTimeInput.addEventListener('change', function() {
-                try {
-                    const s = timeToSec(this.value);
-                    timeRanges[0].start = Math.min(s, timeRanges[0].end);
-                    updateTimelineUI();
-                    renderTimeRanges();
-                } catch {}
-            });
-        }
-        if (endTimeInput) {
-            endTimeInput.addEventListener('change', function() {
-                try {
-                    const e = timeToSec(this.value);
-                    timeRanges[0].end = Math.max(e, timeRanges[0].start);
-                    updateTimelineUI();
-                    renderTimeRanges();
-                } catch {}
-            });
-        }
-
-        updateTimelineUI();
+        updateRangeUI();
     }
 
     function waitBody() {
         if (document.body) {
             const style = document.createElement('style');
             style.textContent = `
-.m3u8-panel{position:fixed;bottom:0;right:0;z-index:999999;background:rgba(10,15,30,0.95);color:#eee;padding:12px;border-radius:10px 0 0 0;font-size:12px;min-width:340px;max-width:94vw;max-height:85vh;overflow-y:auto;box-shadow:0 4px 24px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
+.m3u8-panel{position:fixed;bottom:0;left:0;z-index:999999;background:rgba(10,15,30,0.95);color:#eee;padding:12px;border-radius:0 10px 0 0;font-size:12px;min-width:340px;max-width:94vw;max-height:85vh;overflow-y:auto;box-shadow:0 4px 24px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
 .m3u8-header{font-size:14px;font-weight:bold;color:#4caf50;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #333;text-align:center}
-.m3u8-toggle-btns{display:flex;gap:6px;margin-bottom:10px}
-.toggle-btn{flex:1;padding:8px 10px;background:rgba(40,50,70,0.6);border:1px solid #444;border-radius:6px;color:#aaa;cursor:pointer;font-size:11px;transition:all 0.2s}
-.toggle-btn.active{background:#2a4a2a;border-color:#4caf50;color:#4caf50}
-.toggle-btn:hover{background:rgba(50,60,80,0.6)}
+.m3u8-tabs{display:flex;gap:4px;margin-bottom:10px}
+.tab-btn{flex:1;padding:8px 6px;background:rgba(40,50,70,0.6);border:1px solid #444;border-radius:6px;color:#aaa;cursor:pointer;font-size:11px;transition:all 0.2s}
+.tab-btn.active{background:#2a4a2a;border-color:#4caf50;color:#4caf50}
+.tab-btn:hover{background:rgba(50,60,80,0.6)}
+.m3u8-tab-content{margin-bottom:8px}
 .m3u8-section{background:rgba(20,30,50,0.6);border-radius:6px;padding:10px;margin-bottom:8px}
 .m3u8-section-title{display:flex;align-items:center;justify-content:space-between;color:#fc6;font-weight:bold;font-size:12px;margin-bottom:8px}
 .m3u8-input-row{display:flex;gap:6px}
@@ -602,20 +581,28 @@
 #btnGenRegex{flex:1}
 #btnCopyRegex{flex:1}
 #btnCopyUrls{flex:1}
-#btnAddRange{flex:1}
 .m3u8-filter-info{margin-top:8px;padding:6px;background:#1a2a1a;border-radius:4px;font-size:11px;color:#8f8}
 #regexOutput{width:100%;box-sizing:border-box;padding:8px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;min-height:50px}
 .m3u8-info{margin-top:8px;padding:6px;border-radius:4px;font-size:11px;min-height:20px;color:#888;background:rgba(40,40,40,0.4)}
 .m3u8-info.success{background:#1a2a1a;color:#8f8}
 .m3u8-info.warn{background:#2a2a1a;color:#fc6}
 .m3u8-info.error{background:#2a1a1a;color:#faa}
-.timeline-ctrl{margin-bottom:10px}
-.timeline-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.timeline-label{width:32px;color:#9cf;font-size:11px;font-weight:bold}
-.timeline-bar{position:relative;flex:1;height:20px;background:#333;border-radius:3px;cursor:pointer;touch-action:none;user-select:none}
-.timeline-fill{position:absolute;top:0;height:100%;background:rgba(76,175,80,0.4);border-radius:3px;pointer-events:none}
-.timeline-handle{position:absolute;top:-2px;width:10px;height:24px;background:#ffa500;border:1px solid #ff8c00;border-radius:3px;cursor:ew-resize;z-index:2;transform:translateX(-50%);box-shadow:0 1px 3px rgba(0,0,0,0.4)}
-.timeline-input{width:70px;padding:4px 6px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;text-align:center;font-size:12px;font-family:monospace}
+.dual-range{margin-bottom:10px}
+.range-group{margin-bottom:12px}
+.range-group:last-child{margin-bottom:0}
+.range-group-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.range-label{color:#9cf;font-size:11px;font-weight:bold}
+.video-track{position:relative;height:6px;background:#333;border-radius:3px;cursor:pointer;touch-action:none;user-select:none}
+.video-progress{position:absolute;top:0;left:0;height:100%;background:#4caf50;border-radius:3px;pointer-events:none}
+.video-thumb{position:absolute;top:50%;width:12px;height:12px;background:#fff;border:2px solid #4caf50;border-radius:50%;cursor:grab;z-index:2;transform:translate(-50%,-50%);box-shadow:0 1px 4px rgba(0,0,0,0.5)}
+.video-thumb:active{cursor:grabbing;transform:translate(-50%,-50%) scale(1.2)}
+.range-time-edit{color:#fc6;font-size:11px;font-family:monospace;cursor:pointer;padding:2px 6px;background:rgba(0,0,0,0.3);border-radius:3px;min-width:64px;text-align:center;outline:none;transition:background 0.2s}
+.range-time-edit:hover{background:rgba(76,175,80,0.2)}
+.range-time-edit[contenteditable="true"]{background:#111;border:1px solid #4caf50;color:#4caf50;cursor:text}
+.video-time-row{display:flex;justify-content:center;margin-top:6px}
+.video-time-total{color:#888;font-size:11px;font-family:monospace}
+.time-range-list{margin-top:8px}
+.time-range-empty{margin-top:8px;padding:10px;text-align:center;color:#666;font-size:11px;background:rgba(0,0,0,0.2);border-radius:4px;border:1px dashed #333}
 .tr-row{background:rgba(30,40,60,0.5);border-radius:4px;padding:6px 8px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center}
 .tr-row:last-child{margin-bottom:0}
 .tr-label{color:#9cf;font-weight:bold;font-size:11px}
