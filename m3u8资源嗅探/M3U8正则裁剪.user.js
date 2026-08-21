@@ -173,28 +173,11 @@
     }
 
     function buildTimeRangeRow(startSec, endSec, idx) {
-        const startPct = totalDuration > 0 ? (startSec / totalDuration) * 100 : 0;
-        const endPct = totalDuration > 0 ? (endSec / totalDuration) * 100 : 0;
-        const leftPct = Math.min(startPct, endPct);
-        const widthPct = Math.abs(endPct - startPct);
         return `
 <div class="tr-row" data-idx="${idx}">
-  <div class="tr-header">
-    <span class="tr-label">段${idx + 1}</span>
-    <button class="tr-del" data-idx="${idx}">✕</button>
-  </div>
-  <div class="tr-bar-wrap">
-    <div class="tr-bar" data-role="bar" data-idx="${idx}">
-      <div class="tr-bar-selection" style="left:${leftPct}%;width:${widthPct}%"></div>
-      <div class="tr-bar-handle tr-handle-start" data-role="start" data-idx="${idx}" style="left:${startPct}%"></div>
-      <div class="tr-bar-handle tr-handle-end" data-role="end" data-idx="${idx}" style="left:${endPct}%"></div>
-    </div>
-  </div>
-  <div class="tr-inputs">
-    <input class="tr-start" value="${secToTime(startSec)}" placeholder="000120">
-    <span class="tr-sep">→</span>
-    <input class="tr-end" value="${secToTime(endSec)}" placeholder="000230">
-  </div>
+  <span class="tr-label">段${idx + 1}</span>
+  <span class="tr-times">${secToTime(startSec)} → ${secToTime(endSec)}</span>
+  <button class="tr-del" data-idx="${idx}">✕</button>
 </div>`;
     }
 
@@ -490,14 +473,115 @@
         };
 
         renderTimeRanges();
+
+        panel.querySelectorAll('.toggle-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                panel.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                const targetId = this.dataset.target;
+                panel.querySelectorAll('.m3u8-section').forEach(section => {
+                    section.style.display = 'none';
+                });
+                if (targetId) {
+                    const target = panel.querySelector('#' + targetId);
+                    if (target) target.style.display = 'block';
+                }
+            });
+        });
+
+        const startBar = $('#startBar');
+        const endBar = $('#endBar');
+        const startTimeInput = $('#startTime');
+        const endTimeInput = $('#endTime');
+        let timelineDragging = null;
+
+        function updateTimelineUI() {
+            if (totalDuration <= 0) return;
+            const startPct = (timeRanges[0].start / totalDuration) * 100;
+            const endPct = (timeRanges[0].end / totalDuration) * 100;
+            const startFill = $('#startFill');
+            const endFill = $('#endFill');
+            const startHandle = $('#startHandle');
+            const endHandle = $('#endHandle');
+            if (startFill) startFill.style.width = startPct + '%';
+            if (endFill) endFill.style.width = endPct + '%';
+            if (startHandle) startHandle.style.left = startPct + '%';
+            if (endHandle) endHandle.style.left = endPct + '%';
+            if (startTimeInput) startTimeInput.value = secToTime(timeRanges[0].start);
+            if (endTimeInput) endTimeInput.value = secToTime(timeRanges[0].end);
+        }
+
+        function handleTimelineDrag(e, mode) {
+            if (totalDuration <= 0) return;
+            const bar = mode === 'start' ? startBar : endBar;
+            if (!bar) return;
+            const rect = bar.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            const sec = pct * totalDuration;
+            if (mode === 'start') {
+                timeRanges[0].start = Math.min(sec, timeRanges[0].end);
+            } else {
+                timeRanges[0].end = Math.max(sec, timeRanges[0].start);
+            }
+            updateTimelineUI();
+            renderTimeRanges();
+        }
+
+        if (startBar) {
+            startBar.addEventListener('mousedown', e => {
+                e.preventDefault();
+                timelineDragging = 'start';
+                handleTimelineDrag(e, 'start');
+            });
+        }
+        if (endBar) {
+            endBar.addEventListener('mousedown', e => {
+                e.preventDefault();
+                timelineDragging = 'end';
+                handleTimelineDrag(e, 'end');
+            });
+        }
+        document.addEventListener('mousemove', e => {
+            if (timelineDragging) {
+                handleTimelineDrag(e, timelineDragging);
+            }
+        });
+        document.addEventListener('mouseup', () => { timelineDragging = null; });
+
+        if (startTimeInput) {
+            startTimeInput.addEventListener('change', function() {
+                try {
+                    const s = timeToSec(this.value);
+                    timeRanges[0].start = Math.min(s, timeRanges[0].end);
+                    updateTimelineUI();
+                    renderTimeRanges();
+                } catch {}
+            });
+        }
+        if (endTimeInput) {
+            endTimeInput.addEventListener('change', function() {
+                try {
+                    const e = timeToSec(this.value);
+                    timeRanges[0].end = Math.max(e, timeRanges[0].start);
+                    updateTimelineUI();
+                    renderTimeRanges();
+                } catch {}
+            });
+        }
+
+        updateTimelineUI();
     }
 
     function waitBody() {
         if (document.body) {
             const style = document.createElement('style');
             style.textContent = `
-.m3u8-panel{position:fixed;bottom:12px;right:12px;z-index:999999;background:rgba(10,15,30,0.95);color:#eee;padding:12px;border-radius:10px;font-size:12px;min-width:340px;max-width:94vw;max-height:85vh;overflow-y:auto;box-shadow:0 4px 24px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
+.m3u8-panel{position:fixed;bottom:0;right:0;z-index:999999;background:rgba(10,15,30,0.95);color:#eee;padding:12px;border-radius:10px 0 0 0;font-size:12px;min-width:340px;max-width:94vw;max-height:85vh;overflow-y:auto;box-shadow:0 4px 24px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
 .m3u8-header{font-size:14px;font-weight:bold;color:#4caf50;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #333;text-align:center}
+.m3u8-toggle-btns{display:flex;gap:6px;margin-bottom:10px}
+.toggle-btn{flex:1;padding:8px 10px;background:rgba(40,50,70,0.6);border:1px solid #444;border-radius:6px;color:#aaa;cursor:pointer;font-size:11px;transition:all 0.2s}
+.toggle-btn.active{background:#2a4a2a;border-color:#4caf50;color:#4caf50}
+.toggle-btn:hover{background:rgba(50,60,80,0.6)}
 .m3u8-section{background:rgba(20,30,50,0.6);border-radius:6px;padding:10px;margin-bottom:8px}
 .m3u8-section-title{display:flex;align-items:center;justify-content:space-between;color:#fc6;font-weight:bold;font-size:12px;margin-bottom:8px}
 .m3u8-input-row{display:flex;gap:6px}
@@ -512,7 +596,7 @@
 .btn-preview{background:#447}
 .btn-generate{background:#2a7;font-weight:bold}
 .btn-copy{background:#488}
-.btn-add{background:#447;color:#fff;padding:3px 8px;font-size:10px}
+.btn-add{background:#447;color:#fff;padding:6px 12px;font-size:11px;width:100%;margin-top:8px}
 #btnParse{min-width:50px}
 #btnPreview{flex:1}
 #btnGenRegex{flex:1}
@@ -520,24 +604,23 @@
 #btnCopyUrls{flex:1}
 #btnAddRange{flex:1}
 .m3u8-filter-info{margin-top:8px;padding:6px;background:#1a2a1a;border-radius:4px;font-size:11px;color:#8f8}
-#regexOutput{width:100%;box-sizing:border-box;padding:8px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;min-height:60px}
+#regexOutput{width:100%;box-sizing:border-box;padding:8px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;min-height:50px}
 .m3u8-info{margin-top:8px;padding:6px;border-radius:4px;font-size:11px;min-height:20px;color:#888;background:rgba(40,40,40,0.4)}
 .m3u8-info.success{background:#1a2a1a;color:#8f8}
 .m3u8-info.warn{background:#2a2a1a;color:#fc6}
 .m3u8-info.error{background:#2a1a1a;color:#faa}
-.tr-row{background:rgba(30,40,60,0.5);border-radius:6px;padding:8px;margin-bottom:6px}
+.timeline-ctrl{margin-bottom:10px}
+.timeline-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.timeline-label{width:32px;color:#9cf;font-size:11px;font-weight:bold}
+.timeline-bar{position:relative;flex:1;height:20px;background:#333;border-radius:3px;cursor:pointer;touch-action:none;user-select:none}
+.timeline-fill{position:absolute;top:0;height:100%;background:rgba(76,175,80,0.4);border-radius:3px;pointer-events:none}
+.timeline-handle{position:absolute;top:-2px;width:10px;height:24px;background:#ffa500;border:1px solid #ff8c00;border-radius:3px;cursor:ew-resize;z-index:2;transform:translateX(-50%);box-shadow:0 1px 3px rgba(0,0,0,0.4)}
+.timeline-input{width:70px;padding:4px 6px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;text-align:center;font-size:12px;font-family:monospace}
+.tr-row{background:rgba(30,40,60,0.5);border-radius:4px;padding:6px 8px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center}
 .tr-row:last-child{margin-bottom:0}
-.tr-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
 .tr-label{color:#9cf;font-weight:bold;font-size:11px}
+.tr-times{color:#fc6;font-size:11px;font-family:monospace}
 .tr-del{background:#a33;border:none;color:#fff;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:11px;line-height:1}
-.tr-bar-wrap{margin:4px 0}
-.tr-bar{position:relative;height:22px;background:#333;border-radius:3px;cursor:pointer;touch-action:none;user-select:none}
-.tr-bar-selection{position:absolute;top:0;height:100%;background:rgba(76,175,80,0.3);border-left:2px solid #4caf50;border-right:2px solid #4caf50;border-radius:3px;pointer-events:none}
-.tr-bar-handle{position:absolute;top:-2px;width:8px;height:26px;background:#ffa500;border:1px solid #ff8c00;border-radius:2px;cursor:ew-resize;z-index:2;transform:translateX(-50%);box-shadow:0 1px 3px rgba(0,0,0,0.4)}
-.tr-handle-start::before,.tr-handle-end::before{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2px;height:8px;background:#fff;border-radius:1px}
-.tr-inputs{display:flex;align-items:center;gap:4px;margin-top:6px}
-.tr-inputs input{flex:1;padding:3px 6px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;text-align:center;font-size:13px;font-family:monospace}
-.tr-sep{color:#666;font-size:12px}
 `;
             document.head.appendChild(style);
         }
@@ -557,4 +640,6 @@
             }, 5000);
         }
     }
+
+    waitBody();
 })();
