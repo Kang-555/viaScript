@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         视频嗅探下载器
 // @namespace    http://tampermonkey.net/
-// @version      2.2
-// @description  网页m3u8/mp4视频嗅探下载；m3u8分片ZIP打包+本地m3u8索引；AES‑128解密；适配Via浏览器
+// @version      2.3
+// @description  网页m3u8/mp4视频嗅探下载；m3u8分片ZIP打包+本地m3u8索引；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
 // @match        *://*/*
@@ -30,11 +30,25 @@
     };
 
     // ==========================================
+    // 等待body就绪工具，解决document‑start下body不存在问题
+    // ==========================================
+    const waitBody = () => new Promise(resolve => {
+        if (document.body) return resolve(document.body);
+        const observer = new MutationObserver(() => {
+            if(document.body) {
+                observer.disconnect();
+                resolve(document.body);
+            }
+        });
+        observer.observe(document.documentElement, {childList:true, subtree:true});
+    });
+
+    // ==========================================
     // 1. 全局配置
     // ==========================================
     const Config = {
         scanInterval: 2000,
-        uiId: 'gm‑sniffer‑v23‑ts',
+        uiId: 'gm-sniffer-v23-ts',
         isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent),
         maxThreads: 4,
         maxRetries: 3,
@@ -212,7 +226,7 @@
         },
         decrypt: async (data, key, iv) => {
             try {
-                const algorithm = { name: 'AES‑CBC', iv: iv };
+                const algorithm = { name: 'AES-CBC', iv: iv };
                 const cryptoKey = await window.crypto.subtle.importKey('raw', key, algorithm, false, ['decrypt']);
                 return new Uint8Array(await window.crypto.subtle.decrypt(algorithm, cryptoKey, data));
             } catch (error) {
@@ -231,7 +245,8 @@
     };
 
     const openTsPreviewPage = (tsList, encryptInfo, originM3u8Url, totalDuration) => {
-        const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>M3U8预览 - ${getSafeFileName()}</title>
+        const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M3U8预览 - ${getSafeFileName()}</title>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -281,7 +296,7 @@ loadVideo('${originM3u8Url}');
     };
 
     // ==========================================
-    // 5. 事件总线
+    // 5. 事件总线【修复事件名，全部改为普通英文减号】
     // ==========================================
     const Bus = {
         events: {},
@@ -326,23 +341,23 @@ loadVideo('${originM3u8Url}');
                 if (regex.test(url) || regex.test(typeStr)) {
                     this.seenUrls.add(cleanKey);
                     console.log(`[嗅探] 发现 ${type}: ${url}`);
-                    Bus.emit('video‑found', { url, type });
+                    Bus.emit('video-found', { url, type });
                     return;
                 }
             }
         }
 
         hookFetch() {
-            const targetWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const targetWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            if (!targetWindow.fetch) return;
             const originalFetch = targetWindow.fetch;
-            if (!originalFetch) return;
             targetWindow.fetch = async (...args) => {
                 const url = args[0] instanceof Request ? args[0].url : args[0];
                 const response = await originalFetch.apply(targetWindow, args);
                 try {
                     const clone = response.clone();
                     clone.headers.forEach((val, key) => {
-                        if (key.toLowerCase() === 'content‑type') this.detect(url, val);
+                        if (key.toLowerCase() === 'content-type') this.detect(url, val);
                     });
                 } catch (e) { }
                 return response;
@@ -350,9 +365,9 @@ loadVideo('${originM3u8Url}');
         }
 
         hookXHR() {
-            const targetWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const targetWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            if (!targetWindow.XMLHttpRequest) return;
             const originalXHR = targetWindow.XMLHttpRequest;
-            if (!originalXHR) return;
             const self = this;
             class HijackedXHR extends originalXHR {
                 open(method, url, ...args) {
@@ -363,7 +378,7 @@ loadVideo('${originM3u8Url}');
                     this.addEventListener('readystatechange', () => {
                         if (this.readyState === 4) {
                             try {
-                                const contentType = this.getResponseHeader('content‑type');
+                                const contentType = this.getResponseHeader('content-type');
                                 self.detect(this.responseURL || this._requestUrl, contentType);
                             } catch (e) { }
                         }
@@ -381,7 +396,7 @@ loadVideo('${originM3u8Url}');
     }
 
     // ==========================================
-    // 6. 下载管理器
+    // 下载管理器
     // ==========================================
     class VideoWriter {
         constructor() {
@@ -420,12 +435,12 @@ loadVideo('${originM3u8Url}');
     const parseM3u8 = async (url) => {
         let content = await Utils.request(url);
         // 处理主m3u8多码率
-        if (content.includes('#EXT‑X‑STREAM‑INF')) {
+        if (content.includes('#EXT-X-STREAM-INF')) {
             const lines = content.split('\n');
             let bestBandwidth = 0;
             let bestUrl = null;
             for (let i = 0; i < lines.length; i++) {
-                if (lines[i].startsWith('#EXT‑X‑STREAM‑INF')) {
+                if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
                     const bandwidth = parseInt((lines[i].match(/BANDWIDTH=(\d+)/) || [0, 0])[1]);
                     const nextLine = lines[i + 1]?.trim();
                     if (nextLine && !nextLine.startsWith('#') && bandwidth > bestBandwidth) {
@@ -453,15 +468,15 @@ loadVideo('${originM3u8Url}');
             if (!l) continue;
             if (l.startsWith('#EXT-X-TARGETDURATION')) {
                 targetDuration = parseInt(l.split(':')[1]) || 10;
-            } else if (l.startsWith('#EXT‑X‑KEY')) {
+            } else if (l.startsWith('#EXT-X-KEY')) {
                 const method = (l.match(/METHOD=([^,]+)/) || [])[1];
                 const uri = (l.match(/URI="([^"]+)"/) || [])[1];
-                const ivHex = (l.match(/IV=(0x[\da‑f]+)/i) || [])[1];
-                if (method === 'AES‑128' && uri) {
+                const ivHex = (l.match(/IV=(0x[\da-f]+)/i) || [])[1];
+                if (method === 'AES-128' && uri) {
                     currentKey = Utils.resolveUrl(url, uri);
                     currentIV = ivHex ? AESCrypto.hexToBytes(ivHex) : null;
                 }
-            } else if (l.startsWith('#EXT‑X‑MEDIA‑SEQUENCE')) {
+            } else if (l.startsWith('#EXT-X-MEDIA-SEQUENCE')) {
                 sequence = parseInt(l.split(':')[1]);
             } else if (l.startsWith('#EXTINF:')) {
                 currentInf = parseFloat(l.match(/#EXTINF:([\d.]+)/)[1]);
@@ -511,18 +526,19 @@ loadVideo('${originM3u8Url}');
     };
 
     /**
-     * 下载m3u8，支持分片下标过滤
+     * 生成本地播放用 m3u8 索引（HLS 标准格式）
      */
-    /**
-     * 生成本地播放用 m3u8 索引
-     */
-    const buildLocalM3u8 = (fileNames, targetDuration = 10, keyInfo = null) => {
-        const lines = ['#EXTM3U', '#EXT-X-VERSION:3', `#EXT-X-TARGETDURATION:${targetDuration}`];
-        if (keyInfo && keyInfo.uri) {
-            lines.push(`#EXT-X-KEY:METHOD=AES-128,URI="${keyInfo.uri}"`);
+    const buildLocalM3u8 = (segResults, targetDuration = 10, keyInfo = null) => {
+        const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
+        const maxDur = Math.max(...segResults.map(r => r.dur || targetDuration));
+        lines.push(`#EXT-X-TARGETDURATION:${Math.ceil(maxDur)}`);
+        lines.push('#EXT-X-MEDIA-SEQUENCE:0');
+        if (keyInfo && keyInfo.localName) {
+            lines.push(`#EXT-X-KEY:METHOD=AES-128,URI="${keyInfo.localName}"`);
         }
-        for (const name of fileNames) {
-            lines.push(name);
+        for (const r of segResults) {
+            lines.push(`#EXTINF:${(r.dur || targetDuration).toFixed(3)},`);
+            lines.push(r.fileName);
         }
         lines.push('#EXT-X-ENDLIST');
         return lines.join('\n');
@@ -629,22 +645,22 @@ loadVideo('${originM3u8Url}');
         updateProgress(true);
         console.log(`[downloadM3u8BySegments] 下载完成: 成功${workSegments.length - failCount}个，失败${failCount}个，总字节${totalBytes}`);
 
-        const addedNames = [];
+        const segResults = [];
         for (let i = 0; i < results.length; i++) {
             if (results[i] && results[i].length > 0) {
                 const fileName = `${i.toString().padStart(4, '0')}.ts`;
                 await writer.addFile(fileName, results[i]);
-                addedNames.push(fileName);
+                segResults.push({ fileName, dur: workSegments[i].dur, seq: workSegments[i].seq });
             } else {
                 console.warn(`[downloadM3u8BySegments] 跳过空分片#${i}`);
             }
         }
-        console.log(`[downloadM3u8BySegments] 已添加${addedNames.length}个分片到ZIP`);
+        console.log(`[downloadM3u8BySegments] 已添加${segResults.length}个分片到ZIP`);
 
-        if (addedNames.length === 0) {
+        if (segResults.length === 0) {
             throw new Error('所有分片均下载失败');
         }
-        return addedNames;
+        return segResults;
     };
 
     const downloadMp4 = async (url, onProgress, writer) => {
@@ -731,19 +747,17 @@ loadVideo('${originM3u8Url}');
                         const keyData = await Utils.request(keyUrl, true);
                         keyCache.set(keyUrl, new Uint8Array(keyData));
                         if (!keyInfoForPlaylist) {
-                            try {
-                                const urlObj = new URL(keyUrl);
-                                keyInfoForPlaylist = { uri: keyUrl };
-                            } catch(e) {
-                                keyInfoForPlaylist = { uri: keyUrl };
-                            }
+                            keyInfoForPlaylist = { uri: keyUrl, localName: 'enc.key', data: new Uint8Array(keyData) };
                         }
                     }
                 }
                 console.log('[TaskRunner] 开始下载分片');
-                const addedNames = await downloadM3u8BySegments(segments, keyCache, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer, startIdx, endIdx);
-                console.log('[TaskRunner] 分片下载完成, 共', addedNames.length, '个');
-                await writer.addFile('playlist.m3u8', buildLocalM3u8(addedNames, targetDuration, keyInfoForPlaylist));
+                const segResults = await downloadM3u8BySegments(segments, keyCache, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer, startIdx, endIdx);
+                console.log('[TaskRunner] 分片下载完成, 共', segResults.length, '个');
+                if (keyInfoForPlaylist) {
+                    await writer.addFile(keyInfoForPlaylist.localName, keyInfoForPlaylist.data);
+                }
+                await writer.addFile('playlist.m3u8', buildLocalM3u8(segResults, targetDuration, keyInfoForPlaylist));
                 if (btn) btn.textContent = '保存中...';
                 console.log('[TaskRunner] 生成ZIP:', filename);
                 await writer.close(filename);
@@ -772,7 +786,7 @@ loadVideo('${originM3u8Url}');
     };
 
     // ==========================================
-    // 7. UI悬浮面板
+    // 7. UI悬浮面板【修复移动端兼容】
     // ==========================================
     class UI {
         constructor() {
@@ -781,25 +795,35 @@ loadVideo('${originM3u8Url}');
             this.toggleBtn = null;
             this.resources = [];
             this.openIndex = -1;
+            this.inited = false;
             Bus.on('video-found', (data) => {
-                if (!this.root) this.init();
                 this.addResource(data);
             });
         }
 
-        init() {
+        async init() {
+            if (this.inited) return;
+            await waitBody(); // 等待body存在，再操作DOM！
             if (document.getElementById(Config.uiId)) return;
+
             const host = Utils.createElement('div', {
                 id: Config.uiId,
-                style: { position: 'fixed', bottom: '20px', left: '20px', zIndex: 999999 }
+                style: { position: 'fixed', bottom: 'calc(20px + env(safe-area-inset-bottom))', left: '20px', zIndex: 999999 }
             });
-            const shadow = host.attachShadow({ mode: 'open' });
+
+            let shadow = null;
+            try {
+                shadow = host.attachShadow({ mode: 'open' });
+            } catch(e) {
+                // 移动端ShadowDOM失败降级，直接使用host本身
+                shadow = host;
+            }
 
             const style = Utils.createElement('style');
             style.textContent = `
-                :host { font-family: sans-serif; font-size: 12px; }
+                :host, #${Config.uiId} { font-family: sans-serif; font-size: 12px; }
                 .box {
-                    width: 340px; background: ${Config.colors.background}; color: ${Config.colors.text};
+                    width: min(340px, calc(100vw - 40px)); background: ${Config.colors.background}; color: ${Config.colors.text};
                     border: 1px solid ${Config.colors.primary}; border-radius: 8px;
                     backdrop-filter: blur(5px); display: flex; flex-direction: column;
                     box-shadow: 0 4px 15px rgba(0,0,0,0.5);
@@ -837,24 +861,24 @@ loadVideo('${originM3u8Url}');
                 .section-title { font-size: 11px; color: #aaa; margin: 6px 0 4px; }
                 .mode-row { display: flex; gap: 12px; margin-bottom: 6px; font-size: 11px; }
                 .mode-row label { cursor: pointer; display: flex; align-items: center; gap: 4px; }
-                .input-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+                .input-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap:wrap; }
                 .input-row label { min-width: 48px; color: #aaa; font-size: 11px; }
                 .input-row input {
-                    flex: 1; padding: 4px 8px; border: 1px solid #333; border-radius: 4px;
-                    background: #0f3460; color: #fff; font-size: 11px; min-width: 0;
+                    flex: 1; padding: 6px 8px; border: 1px solid #333; border-radius: 4px;
+                    background: #0f3460; color: #fff; font-size: 11px; min-width: 60px;
                 }
-                button { border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+                button { border: none; padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
                 .btn-primary {
                     flex: 1; background: ${Config.colors.primary}; color: #000;
-                    font-weight: bold; padding: 6px 10px;
+                    font-weight: bold; padding: 7px 8px;
                 }
                 .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
                 .btn-secondary { background: #2196F3; color: #fff; }
                 .btn-copy { background: #555; color: white; }
-                .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+                .btn-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap:wrap; }
                 .empty-tip { padding: 20px; text-align: center; color: #666; }
                 .toggle-btn {
-                    position: fixed; bottom: 20px; left: 20px; width: 44px; height: 44px;
+                    position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); left: 20px; width: 44px; height: 44px;
                     border-radius: 50%; background: ${Config.colors.primary}; color: #000;
                     display: flex; align-items: center; justify-content: center;
                     font-size: 18px; cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,0.3);
@@ -876,11 +900,13 @@ loadVideo('${originM3u8Url}');
 
             shadow.appendChild(style);
             shadow.appendChild(this.root);
-            shadow.appendChild(this.toggleBtn);
-            (document.body || document.documentElement).appendChild(host);
+            if(shadow !== host) shadow.appendChild(this.toggleBtn);
+            else host.appendChild(this.toggleBtn);
+
+            document.body.appendChild(host);
 
             this.root.style.display = 'none';
-
+            this.inited = true;
             this.renderList();
         }
 
@@ -889,7 +915,8 @@ loadVideo('${originM3u8Url}');
             const exists = this.resources.some(r => r.url === url);
             if (exists) return;
             this.resources.unshift({ url, type: normalizedType });
-            this.renderList();
+            // 如果还没初始化，延迟渲染；初始化完成立刻渲染
+            if(this.inited) this.renderList();
         }
 
         toggleItem(index) {
@@ -964,6 +991,7 @@ loadVideo('${originM3u8Url}');
         }
 
         renderList() {
+            if(!this.inited || !this.list) return;
             this.list.innerHTML = '';
             if (this.resources.length === 0) {
                 this.list.innerHTML = '<div class="empty-tip">暂无资源</div>';
@@ -1077,7 +1105,9 @@ loadVideo('${originM3u8Url}');
         }
     }
 
-
+    // 嗅探器立刻启动（网络劫持需要尽早）
     new Sniffer().start();
-    new UI();
+    // UI延迟等待body就绪后初始化
+    const ui = new UI();
+    ui.init();
 })();
