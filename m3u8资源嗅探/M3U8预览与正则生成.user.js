@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         M3U8预览与正则生成
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.4
 // @description  自动解析m3u8，新标签页预览视频+进度条选择时间段，生成正则表达式
 // @match        *://*/*
 // @connect      *
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
-// @grant        unsafeWindow
-// @run-at       document-start
+// @run-at       document-idle
 // ==/UserScript==
 
 (function () {
@@ -31,7 +30,22 @@
             }
         });
         observer.observe(document.documentElement, { childList: true, subtree: true });
+        setTimeout(() => {
+            if (document.body) { observer.disconnect(); resolve(document.body); }
+        }, 5000);
     });
+
+    const getRealWindow = () => {
+        try {
+            if (window.fetch && /native code/.test(window.fetch.toString())) return window;
+        } catch (e) {}
+        try {
+            if (typeof unsafeWindow !== 'undefined') {
+                if (unsafeWindow && unsafeWindow.fetch) return unsafeWindow;
+            }
+        } catch (e) {}
+        return window;
+    };
 
     const Utils = {
         request: (url) => {
@@ -136,7 +150,7 @@
         },
 
         buildNumericRangeRegex: (min, max) => {
-            if (min === max) return String(min);
+            if (min === max) return `(?<!\\d)${min}(?!\\d)`;
             const minStr = String(min);
             const maxStr = String(max);
             if (minStr.length !== maxStr.length) {
@@ -148,9 +162,9 @@
                 }
                 const longMin = Math.pow(10, maxStr.length - 1);
                 parts.push(Utils.buildSameLengthRegex(String(longMin), maxStr));
-                return parts.join('|');
+                return `(?<!\\d)(?:${parts.join('|')})(?!\\d)`;
             }
-            return Utils.buildSameLengthRegex(minStr, maxStr);
+            return `(?<!\\d)${Utils.buildSameLengthRegex(minStr, maxStr)}(?!\\d)`;
         }
     };
 
@@ -259,7 +273,7 @@
             return Utils.buildNumericRangeRegex(min, max);
         } else {
             const names = segments.map(getFileName).map(Utils.escapeRegex);
-            return `(?:${names.join('|')})`;
+            return `\\b(?:${names.join('|')})\\b`;
         }
     };
 
@@ -272,76 +286,88 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>${safeTitle}</title>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{padding:16px;font-family:system-ui;font-size:14px;background:#1a1a2e;color:#eee;min-height:100vh}
+body{padding:12px;padding-bottom:calc(12px + env(safe-area-inset-bottom));font-family:system-ui;font-size:14px;background:#1a1a2e;color:#eee;min-height:100vh;-webkit-text-size-adjust:100%}
 h2{margin-bottom:12px;color:#4caf50;font-size:16px}
-.player-box{background:#16213e;border-radius:8px;padding:12px;margin-bottom:16px}
-video{width:100%;max-height:420px;background:#000;border-radius:4px}
-.info{background:#16213e;border-radius:8px;padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px}
+.player-box{background:#16213e;border-radius:8px;padding:8px;margin-bottom:12px}
+video{width:100%;max-height:420px;background:#000;border-radius:4px;display:block}
+.info{background:#16213e;border-radius:8px;padding:12px;display:grid;grid-template-columns:1fr;gap:8px;margin-top:16px}
 .info p{margin:4px 0;word-break:break-all}
 .label{color:#888}
 .value{color:#4caf50;font-weight:bold}
-.section{background:#16213e;border-radius:8px;padding:12px;margin-bottom:16px}
+@media(min-width:600px){
+    .info{grid-template-columns:1fr 1fr}
+}
+.section{background:#16213e;border-radius:8px;padding:10px;margin-bottom:12px}
 .section-title{color:#fc6;font-weight:bold;font-size:12px;margin-bottom:8px}
 .time-range-list{max-height:200px;overflow-y:auto}
 .time-range-row{display:flex;align-items:center;gap:4px;margin:3px 0}
 .time-range-row span{color:#9cf;font-size:11px}
-.time-range-row input{width:72px;padding:2px;box-sizing:border-box;background:#222;color:#fff;border:1px solid #555;border-radius:3px}
-.time-range-row button{background:#a33;border:none;color:#fff;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:11px}
-.btn-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-button{border:none;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:11px;color:#fff}
-.btn-primary{background:#26c;font-weight:bold}
-.btn-success{background:#2a7}
-.btn-warning{background:#c82}
-.btn-secondary{background:#488}
-textarea{width:100%;padding:5px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;box-sizing:border-box}
-.progress-bar-container{position:relative;height:30px;background:#333;border-radius:4px;margin:8px 0;cursor:pointer;overflow:hidden}
+.progress-bar-container{position:relative;height:36px;background:#333;border-radius:4px;margin:8px 0;cursor:pointer;overflow:hidden;touch-action:none}
 .progress-bar-fill{height:100%;background:linear-gradient(90deg,#4caf50,#2196F3);border-radius:4px;transition:width 0.1s}
 .progress-bar-markers{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none}
 .progress-bar-marker{position:absolute;top:0;height:100%;background:rgba(255,165,0,0.3);border-left:2px solid #ffa500;border-right:2px solid #ffa500}
 .progress-bar-handle{position:absolute;top:0;width:4px;height:100%;background:#ffa500;cursor:ew-resize}
+.time-input-row{display:flex;align-items:center;gap:8px;margin:8px 0}
+.time-input-row label{color:#9cf;font-size:12px;min-width:40px}
+.time-input-row input[type="text"]{width:80px;padding:8px 6px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;text-align:center;font-size:16px}
+.time-input-row .time-display{color:#8f8;font-size:12px;min-width:70px}
 .hint{color:#aaa;font-size:11px;margin:4px 0}
 .msg{padding:6px;border-radius:4px;font-size:11px;margin-top:8px;min-height:20px}
 .msg-success{background:#1a2a1a;color:#8f8}
 .msg-error{background:#2a1a1a;color:#faa}
 .msg-warn{background:#2a2a1a;color:#fc6}
-</style>
+.btn-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+button{border:none;padding:10px 12px;border-radius:4px;cursor:pointer;font-size:12px;color:#fff;min-height:36px}
+.btn-primary{background:#26c;font-weight:bold}
+.btn-success{background:#2a7}
+.btn-warning{background:#c82}
+.btn-secondary{background:#488}
+textarea{width:100%;padding:8px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;box-sizing:border-box;min-height:60px}
+.time-range-row input{width:72px;padding:8px 4px;box-sizing:border-box;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:14px}
+.time-range-row button{background:#a33;border:none;color:#fff;border-radius:3px;padding:8px 8px;cursor:pointer;font-size:11px;min-height:32px}</style>
 </head>
 <body>
 <h2>🎬 M3U8 预览与正则生成</h2>
 <div class="player-box">
 <video id="player" controls></video>
 </div>
-<div class="info">
-<div><span class="label">原始地址：</span><br><a target="_blank" href="${url}" style="color:#2196F3;word-break:break-all">${url}</a></div>
-<div><span class="label">分片总数：</span><br><span class="value">${segments.length}</span></div>
-<div><span class="label">总时长：</span><br><span class="value">${Utils.formatTime(totalDuration)}</span></div>
-<div><span class="label">加密状态：</span><br><span class="value">${segments.some(s => s.key) ? 'AES-128加密' : '未加密'}</span></div>
+<div class="section">
+<div class="section-title">📍 时间段选择（进度条 + 手动输入）</div>
+<div class="time-input-row">
+<label>起点</label>
+<div class="progress-bar-container" id="startProgressBar">
+<div class="progress-bar-fill" id="startProgressFill" style="width:0%"></div>
+</div>
+<input type="text" id="startTimeInput" value="00:00:00" placeholder="000120">
+<span class="time-display" id="startTimeDisplay">00:00:00</span>
+</div>
+<div class="hint">💡 点击/拖拽进度条或手动输入设置起点</div>
+
+<div class="time-input-row">
+<label>终点</label>
+<div class="progress-bar-container" id="endProgressBar">
+<div class="progress-bar-fill" id="endProgressFill" style="width:0%"></div>
+</div>
+<input type="text" id="endTimeInput" value="00:01:00" placeholder="000230">
+<span class="time-display" id="endTimeDisplay">00:01:00</span>
+</div>
+<div class="hint">💡 点击/拖拽进度条或手动输入设置终点</div>
+
+<div class="btn-row">
+<button class="btn-primary" id="btnAddRange">➕ 添加时间段</button>
 </div>
 
-<div class="section">
-<div class="section-title">📍 进度条选择时间段（点击/拖拽添加）</div>
-<div class="progress-bar-container" id="progressBar">
-<div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
-<div class="progress-bar-markers" id="progressMarkers"></div>
-</div>
-<div class="hint">💡 点击进度条设置起点，再次点击设置终点，自动添加时间段</div>
+<div style="border-top:1px solid #333;margin-top:12px;padding-top:8px;">
+<div style="color:#9cf;font-size:11px;margin-bottom:4px;">已添加的时间段：</div>
 <div id="timeRangeList" class="time-range-list"></div>
 <div class="btn-row">
-<button class="btn-secondary" id="btnAddRange">➕ 添加时间段</button>
-<button class="btn-warning" id="btnClearRanges">🗑️ 清空时间段</button>
+<button class="btn-warning" id="btnClearRanges">🗑️ 清空全部</button>
 </div>
-</div>
-
-<div class="section">
-<div class="section-title">⏱ 手动输入时间段</div>
-<div id="manualTimeInputs"></div>
-<div class="btn-row">
-<button class="btn-primary" id="btnApplyManual">应用时间段</button>
 </div>
 </div>
 
@@ -356,18 +382,31 @@ textarea{width:100%;padding:5px;background:#111;color:#6f9;border:1px solid #333
 <div id="regexMsg" class="msg" style="display:none"></div>
 </div>
 
+<div class="info">
+<div><span class="label">原始地址：</span><br><a target="_blank" href="${url}" style="color:#2196F3;word-break:break-all">${url}</a></div>
+<div><span class="label">分片总数：</span><br><span class="value">${segments.length}</span></div>
+<div><span class="label">总时长：</span><br><span class="value">${Utils.formatTime(totalDuration)}</span></div>
+<div><span class="label">加密状态：</span><br><span class="value">${segments.some(s => s.key) ? 'AES-128加密' : '未加密'}</span></div>
+</div>
+
 <script>
 const videoData = ${segmentsJson};
 const video = document.getElementById('player');
-const progressBar = document.getElementById('progressBar');
-const progressFill = document.getElementById('progressFill');
-const progressMarkers = document.getElementById('progressMarkers');
+const startProgressBar = document.getElementById('startProgressBar');
+const startProgressFill = document.getElementById('startProgressFill');
+const endProgressBar = document.getElementById('endProgressBar');
+const endProgressFill = document.getElementById('endProgressFill');
+const startTimeInput = document.getElementById('startTimeInput');
+const endTimeInput = document.getElementById('endTimeInput');
+const startTimeDisplay = document.getElementById('startTimeDisplay');
+const endTimeDisplay = document.getElementById('endTimeDisplay');
 const timeRangeList = document.getElementById('timeRangeList');
-const manualTimeInputs = document.getElementById('manualTimeInputs');
 
 let timeRanges = [];
-let rangeStart = null;
-let isDragging = false;
+let currentStartSec = 0;
+let currentEndSec = 60;
+let isDraggingStart = false;
+let isDraggingEnd = false;
 let currentHls = null;
 let regexResult = '';
 
@@ -405,25 +444,20 @@ function timeToSec(str) {
     return arr[0] * 3600 + arr[1] * 60 + arr[2];
 }
 
-function updateProgress() {
-    if (video.duration) {
-        const pct = (video.currentTime / video.duration) * 100;
-        progressFill.style.width = pct + '%';
-    }
+function updateStartBar(sec) {
+    currentStartSec = Math.max(0, Math.min(sec, videoData.totalDuration));
+    const pct = (currentStartSec / videoData.totalDuration) * 100;
+    startProgressFill.style.width = pct + '%';
+    startTimeInput.value = secToTime(currentStartSec);
+    startTimeDisplay.textContent = secToTime(currentStartSec);
 }
 
-function renderMarkers() {
-    progressMarkers.innerHTML = '';
-    const totalDur = videoData.totalDuration;
-    timeRanges.forEach(range => {
-        const left = (range.start / totalDur) * 100;
-        const width = ((range.end - range.start) / totalDur) * 100;
-        const marker = document.createElement('div');
-        marker.className = 'progress-bar-marker';
-        marker.style.left = left + '%';
-        marker.style.width = width + '%';
-        progressMarkers.appendChild(marker);
-    });
+function updateEndBar(sec) {
+    currentEndSec = Math.max(0, Math.min(sec, videoData.totalDuration));
+    const pct = (currentEndSec / videoData.totalDuration) * 100;
+    endProgressFill.style.width = pct + '%';
+    endTimeInput.value = secToTime(currentEndSec);
+    endTimeDisplay.textContent = secToTime(currentEndSec);
 }
 
 function renderTimeRanges() {
@@ -443,7 +477,6 @@ function renderTimeRanges() {
             if (timeRanges.length <= 1) { alert('至少保留一个时间段'); return; }
             timeRanges.splice(idx, 1);
             renderTimeRanges();
-            renderMarkers();
         };
     });
 
@@ -536,7 +569,7 @@ function buildSameLengthRegex(minStr, maxStr) {
 }
 
 function buildNumericRangeRegex(min, max) {
-    if (min === max) return String(min);
+    if (min === max) return '(?<!\\d)' + min + '(?!\\d)';
     const minStr = String(min);
     const maxStr = String(max);
     if (minStr.length !== maxStr.length) {
@@ -548,9 +581,9 @@ function buildNumericRangeRegex(min, max) {
         }
         const longMin = Math.pow(10, maxStr.length - 1);
         parts.push(buildSameLengthRegex(String(longMin), maxStr));
-        return parts.join('|');
+        return '(?<!\\d)(?:' + parts.join('|') + ')(?!\\d)';
     }
-    return buildSameLengthRegex(minStr, maxStr);
+    return '(?<!\\d)' + buildSameLengthRegex(minStr, maxStr) + '(?!\\d)';
 }
 
 function generateRegexFromSegments(segments) {
@@ -571,8 +604,24 @@ function generateRegexFromSegments(segments) {
         return buildNumericRangeRegex(min, max);
     } else {
         const names = segments.map(getFileName).map(escapeRegex);
-        return '(?:' + names.join('|') + ')';
+        return '\\b(?:' + names.join('|') + ')\\b';
     }
+}
+
+function copyToClipboard(text) {
+    if (typeof GM_setClipboard !== 'undefined') {
+        try { GM_setClipboard(text); return true; } catch (e) {}
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {}).catch(() => {});
+        return true;
+    }
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
+        return true;
+    } catch (e) { return false; }
 }
 
 function showMsg(text, type) {
@@ -582,80 +631,121 @@ function showMsg(text, type) {
     msgEl.className = 'msg msg-' + type;
 }
 
-progressBar.addEventListener('mousedown', (e) => {
-    isDragging = true;
-    handleProgressClick(e);
+// 起点进度条交互
+startProgressBar.addEventListener('mousedown', (e) => {
+    isDraggingStart = true;
+    handleStartBarClick(e);
 });
-progressBar.addEventListener('mousemove', (e) => {
-    if (isDragging) handleProgressClick(e);
+startProgressBar.addEventListener('mousemove', (e) => {
+    if (isDraggingStart) handleStartBarClick(e);
 });
-progressBar.addEventListener('mouseup', () => { isDragging = false; });
-progressBar.addEventListener('touchstart', (e) => {
-    isDragging = true;
-    handleProgressClick(e.touches[0]);
+startProgressBar.addEventListener('mouseup', () => { isDraggingStart = false; });
+startProgressBar.addEventListener('touchstart', (e) => {
+    isDraggingStart = true;
+    handleStartBarClick(e.touches[0]);
 });
-progressBar.addEventListener('touchmove', (e) => {
-    if (isDragging) handleProgressClick(e.touches[0]);
+startProgressBar.addEventListener('touchmove', (e) => {
+    if (isDraggingStart) handleStartBarClick(e.touches[0]);
 });
-progressBar.addEventListener('touchend', () => { isDragging = false; });
+startProgressBar.addEventListener('touchend', () => { isDraggingStart = false; });
 
-function handleProgressClick(e) {
-    const rect = progressBar.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const pct = Math.max(0, Math.min(1, x / rect.width));
-    const clickTime = pct * videoData.totalDuration;
+// 终点进度条交互
+endProgressBar.addEventListener('mousedown', (e) => {
+    isDraggingEnd = true;
+    handleEndBarClick(e);
+});
+endProgressBar.addEventListener('mousemove', (e) => {
+    if (isDraggingEnd) handleEndBarClick(e);
+});
+endProgressBar.addEventListener('mouseup', () => { isDraggingEnd = false; });
+endProgressBar.addEventListener('touchstart', (e) => {
+    isDraggingEnd = true;
+    handleEndBarClick(e.touches[0]);
+});
+endProgressBar.addEventListener('touchmove', (e) => {
+    if (isDraggingEnd) handleEndBarClick(e.touches[0]);
+});
+endProgressBar.addEventListener('touchend', () => { isDraggingEnd = false; });
 
-    if (rangeStart === null) {
-        rangeStart = clickTime;
-    } else {
-        let start = Math.min(rangeStart, clickTime);
-        let end = Math.max(rangeStart, clickTime);
-        if (end - start < 0.5) {
-            end = start + 60;
+function seekVideo(sec) {
+    try {
+        if (isFinite(sec) && sec >= 0 && sec <= videoData.totalDuration) {
+            video.currentTime = sec;
         }
-        timeRanges.push({ start, end });
-        rangeStart = null;
-        renderTimeRanges();
-        renderMarkers();
-    }
+    } catch(e) {}
 }
 
+function handleStartBarClick(e) {
+    const rect = startProgressBar.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const pct = Math.max(0, Math.min(1, x / rect.width));
+    const sec = pct * videoData.totalDuration;
+    updateStartBar(sec);
+    seekVideo(sec);
+}
+
+function handleEndBarClick(e) {
+    const rect = endProgressBar.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const pct = Math.max(0, Math.min(1, x / rect.width));
+    const sec = pct * videoData.totalDuration;
+    updateEndBar(sec);
+    seekVideo(sec);
+}
+
+// 手动输入同步
+startTimeInput.addEventListener('input', function() {
+    const raw = this.value;
+    const onlyDigits = raw.replace(/\D/g, '').slice(0, 6);
+    if (onlyDigits.length > 0) {
+        this.value = numToHms(onlyDigits);
+        this.selectionStart = this.selectionEnd = this.value.length;
+        try {
+            const sec = timeToSec(this.value);
+            updateStartBar(sec);
+            seekVideo(sec);
+        } catch(e) {}
+    }
+});
+
+endTimeInput.addEventListener('input', function() {
+    const raw = this.value;
+    const onlyDigits = raw.replace(/\D/g, '').slice(0, 6);
+    if (onlyDigits.length > 0) {
+        this.value = numToHms(onlyDigits);
+        this.selectionStart = this.selectionEnd = this.value.length;
+        try {
+            const sec = timeToSec(this.value);
+            updateEndBar(sec);
+            seekVideo(sec);
+        } catch(e) {}
+    }
+});
+
+// 添加时间段
 document.getElementById('btnAddRange').onclick = () => {
-    const lastRange = timeRanges[timeRanges.length - 1];
-    const start = lastRange ? lastRange.end : 0;
-    const end = start + 60;
+    let start = currentStartSec;
+    let end = currentEndSec;
+    if (end <= start) {
+        end = Math.min(start + 60, videoData.totalDuration);
+    }
+    if (end > videoData.totalDuration) end = videoData.totalDuration;
+    if (start >= end) { showMsg('⚠️ 时间段无效', 'warn'); return; }
     timeRanges.push({ start, end });
     renderTimeRanges();
-    renderMarkers();
+    
+    // 重置为下一段默认值
+    updateStartBar(end);
+    updateEndBar(end + 60);
+    showMsg('✅ 已添加时间段: ' + secToTime(start) + ' - ' + secToTime(end), 'success');
 };
 
 document.getElementById('btnClearRanges').onclick = () => {
-    timeRanges = [{ start: 0, end: Math.min(60, videoData.totalDuration) }];
+    timeRanges = [];
     renderTimeRanges();
-    renderMarkers();
-};
-
-document.getElementById('btnApplyManual').onclick = () => {
-    const inputs = manualTimeInputs.querySelectorAll('.manual-start, .manual-end');
-    const newRanges = [];
-    for (let i = 0; i < inputs.length; i += 2) {
-        const startStr = inputs[i].value.trim();
-        const endStr = inputs[i + 1].value.trim();
-        try {
-            const s = timeToSec(startStr);
-            const e = timeToSec(endStr);
-            if (s >= e) { alert('开始时间需早于结束时间'); return; }
-            newRanges.push({ start: s, end: e });
-        } catch {
-            alert('时间格式错误');
-            return;
-        }
-    }
-    if (newRanges.length === 0) { alert('请至少输入一个时间段'); return; }
-    timeRanges = newRanges;
-    renderTimeRanges();
-    renderMarkers();
-    showMsg('✅ 时间段已应用', 'success');
+    updateStartBar(0);
+    updateEndBar(Math.min(60, videoData.totalDuration));
+    showMsg('🗑️ 已清空时间段', 'warn');
 };
 
 document.getElementById('btnGenRegex').onclick = () => {
@@ -695,7 +785,7 @@ document.getElementById('btnGenRegex').onclick = () => {
 document.getElementById('btnCopyRegex').onclick = () => {
     const val = document.getElementById('regexOutput').value.trim();
     if (!val) { showMsg('⚠️ 正则为空', 'warn'); return; }
-    GM_setClipboard(val);
+    copyToClipboard(val);
     showMsg('✅ 正则已复制', 'success');
 };
 
@@ -718,8 +808,6 @@ document.getElementById('btnCopyUrls').onclick = () => {
     showMsg('✅ 已复制 ' + allUrls.length + ' 个URL', 'success');
 };
 
-video.addEventListener('timeupdate', updateProgress);
-
 if (Hls.isSupported()) {
     currentHls = new Hls();
     currentHls.loadSource(videoData.url);
@@ -730,16 +818,22 @@ if (Hls.isSupported()) {
     video.play().catch(() => {});
 }
 
-timeRanges = [{ start: 0, end: Math.min(60, videoData.totalDuration) }];
+// 初始化
+updateStartBar(0);
+updateEndBar(Math.min(60, videoData.totalDuration));
 renderTimeRanges();
-renderMarkers();
 <\/script>
 </body>
 </html>`;
 
         const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
         const previewUrl = URL.createObjectURL(blob);
-        window.open(previewUrl, '_blank');
+        const win = window.open(previewUrl, '_blank');
+        if (!win) {
+            if (confirm('新窗口被拦截，是否在当前页面打开预览？')) {
+                window.location.href = previewUrl;
+            }
+        }
     };
 
     class Sniffer {
@@ -776,7 +870,7 @@ renderMarkers();
         }
 
         hookFetch() {
-            const targetWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const targetWindow = getRealWindow();
             if (!targetWindow.fetch) return;
             const originalFetch = targetWindow.fetch;
             targetWindow.fetch = async (...args) => {
@@ -793,7 +887,7 @@ renderMarkers();
         }
 
         hookXHR() {
-            const targetWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const targetWindow = getRealWindow();
             if (!targetWindow.XMLHttpRequest) return;
             const originalXHR = targetWindow.XMLHttpRequest;
             const self = this;
@@ -853,9 +947,10 @@ renderMarkers();
             await waitBody();
             if (document.getElementById('gm-m3u8-preview-ui')) return;
 
-            const host = document.createElement('div');
-            host.id = 'gm-m3u8-preview-ui';
-            host.style.cssText = 'position:fixed;bottom:calc(20px + env(safe-area-inset-bottom));left:20px;z-index:999999;';
+            try {
+                const host = document.createElement('div');
+                host.id = 'gm-m3u8-preview-ui';
+                host.style.cssText = 'position:fixed;bottom:calc(20px + env(safe-area-inset-bottom));left:20px;z-index:999999;';
 
             const style = document.createElement('style');
             style.textContent = `
@@ -942,6 +1037,9 @@ renderMarkers();
             this.root.style.display = 'none';
             this.inited = true;
             this.renderList();
+            } catch (err) {
+                console.error('[M3U8嗅探] UI创建失败:', err);
+            }
         }
 
         addResource({ url, type }) {
@@ -958,9 +1056,17 @@ renderMarkers();
         }
 
         copyUrl(url) {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(url).then(() => alert('已复制链接'));
+            if (typeof GM_setClipboard !== 'undefined') {
+                try { GM_setClipboard(url); alert('已复制链接'); return; } catch (e) {}
             }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(() => alert('已复制链接')).catch(() => {});
+                return;
+            }
+            const ta = document.createElement('textarea');
+            ta.value = url; document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); alert('已复制链接'); } catch (e) {}
+            document.body.removeChild(ta);
         }
 
         async previewM3u8(url) {
@@ -1040,7 +1146,13 @@ renderMarkers();
         }
     }
 
-    new Sniffer().start();
-    const ui = new UI();
-    ui.init();
+    try {
+        new Sniffer().start();
+        const ui = new UI();
+        ui.init().catch(err => {
+            console.error('[M3U8嗅探] UI初始化失败:', err);
+        });
+    } catch (err) {
+        console.error('[M3U8嗅探] 脚本启动失败:', err);
+    }
 })();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8裁剪
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  多时间段筛选+自动生成正则
 // @match        http://*/*
 // @match        https://*/*
@@ -54,7 +54,7 @@
 
     // 数字范围→正则（如5-10 → [5-9]|10）
     function buildNumericRangeRegex(min, max) {
-        if (min === max) return String(min);
+        if (min === max) return `(?<!\\d)${min}(?!\\d)`;
         const minStr = String(min);
         const maxStr = String(max);
         // 位数不同时按位数分段
@@ -70,9 +70,9 @@
             // 长位段：10^(n-1) 到 max
             const longMin = Math.pow(10, maxStr.length - 1);
             parts.push(buildSameLengthRegex(String(longMin), maxStr));
-            return parts.join('|');
+            return `(?<!\\d)(?:${parts.join('|')})(?!\\d)`;
         }
-        return buildSameLengthRegex(minStr, maxStr);
+        return `(?<!\\d)${buildSameLengthRegex(minStr, maxStr)}(?!\\d)`;
     }
 
     // 等长数字范围→正则
@@ -248,7 +248,7 @@
                 rangeParts.push(buildNumericRangeRegex(min, max));
             } else {
                 const names = rangeSegs.map(getFileName).map(escapeRegex);
-                rangeParts.push(`(?:${names.join('|')})`);
+                rangeParts.push(`\\b(?:${names.join('|')})\\b`);
             }
         }
         return rangeParts.length > 0 ? rangeParts.join('|') : null;
@@ -290,22 +290,27 @@
 <div style="margin-bottom:6px;">
   <input id="m3u8Input" placeholder="粘贴m3u8链接..." style="width:100%;box-sizing:border-box;padding:5px;border-radius:4px;border:1px solid #555;background:#222;color:#fff;">
 </div>
-<div style="margin-bottom:6px;">
-  <textarea id="m3u8Text" rows="4" placeholder="或直接粘贴m3u8文本内容..." style="width:100%;box-sizing:border-box;padding:5px;border-radius:4px;border:1px solid #555;background:#222;color:#fff;font-family:monospace;font-size:10px;resize:vertical;"></textarea>
-</div>
 <div style="display:flex;gap:4px;margin-bottom:8px;">
   <button id="btnParse" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;">解析链接</button>
-  <button id="btnParseText" style="flex:1;padding:5px;background:#2a7;border:none;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;">解析文本</button>
 </div>
 
-<div id="statArea" style="display:none;margin-bottom:8px;padding:6px;background:#1a1a2a;border-radius:6px;font-size:11px;color:#acf;"></div>
+<div id="statSection" style="display:none;border-top:1px solid #333;padding-top:6px;margin-bottom:4px;">
+  <div class="section-toggle" data-target="statDetails" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:4px 0;">
+    <span style="color:#8f8;font-weight:bold;font-size:11px;">▶ ✅ 解析完成</span>
+  </div>
+  <div id="statDetails" style="display:none;padding:4px 0 8px 0;">
+    <div id="statArea" style="padding:6px;background:#1a1a2a;border-radius:6px;font-size:11px;color:#acf;"></div>
+  </div>
+</div>
 
-<div style="border-top:1px solid #333;padding-top:8px;margin-bottom:6px;">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-    <span style="color:#fc6;font-weight:bold;font-size:11px;">⏱ 时间段筛选（多段）</span>
+<div style="border-top:1px solid #333;padding-top:6px;margin-bottom:4px;">
+  <div class="section-toggle" data-target="timeSection" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:4px 0;">
+    <span style="color:#fc6;font-weight:bold;font-size:11px;">▶ ⏱ 时间段筛选</span>
     <button id="btnAddRange" style="background:#447;border:none;color:#fff;border-radius:3px;padding:2px 7px;cursor:pointer;font-size:11px;">➕ 添加</button>
   </div>
-  <div id="timeRangeList"></div>
+  <div id="timeSection" style="display:none;padding:4px 0 8px 0;">
+    <div id="timeRangeList"></div>
+  </div>
 </div>
 
 <div style="display:flex;gap:4px;margin-bottom:8px;">
@@ -315,23 +320,29 @@
 
 <div id="filterInfo" style="display:none;margin-bottom:6px;padding:4px 8px;background:#1a2a1a;border-radius:4px;font-size:11px;color:#8f8;"></div>
 
-<div id="regexArea" style="display:none;border-top:1px solid #333;padding-top:8px;margin-bottom:8px;">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-    <span style="color:#6ef;font-weight:bold;font-size:11px;">🔍 正则表达式</span>
+<div style="border-top:1px solid #333;padding-top:6px;margin-bottom:4px;">
+  <div class="section-toggle" data-target="regexSection" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:4px 0;">
+    <span style="color:#6ef;font-weight:bold;font-size:11px;">▶ 🔍 正则表达式</span>
   </div>
-  <textarea id="regexOutput" rows="3" style="width:100%;box-sizing:border-box;padding:5px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;" placeholder="点击『生成正则』后显示..."></textarea>
-  <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;">
-    <button id="btnCopyRegex" style="flex:1;padding:5px;background:#c82;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">复制正则</button>
-    <button id="btnCopyUrls" style="flex:1;padding:5px;background:#488;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">复制匹配URL</button>
+  <div id="regexSection" style="display:none;padding:4px 0 8px 0;">
+    <textarea id="regexOutput" rows="3" style="width:100%;box-sizing:border-box;padding:5px;background:#111;color:#6f9;border:1px solid #333;border-radius:4px;font-family:monospace;font-size:11px;" placeholder="点击『生成正则』后显示..."></textarea>
+    <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;">
+      <button id="btnCopyRegex" style="flex:1;padding:5px;background:#c82;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">复制正则</button>
+      <button id="btnCopyUrls" style="flex:1;padding:5px;background:#488;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">复制匹配URL</button>
+    </div>
   </div>
 </div>
 
-<div style="border-top:1px solid #333;padding-top:8px;">
-  <span style="color:#aaa;font-size:11px;">📦 裁剪M3U8文件</span>
-  <div style="display:flex;gap:4px;margin-top:4px;">
-    <button id="btnGenClip" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;">生成裁剪M3U8</button>
-    <button id="btnCopyClip" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;">复制裁剪文本</button>
-    <button id="btnDownload" style="flex:1;padding:5px;background:#2c6;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;">下载clip.m3u8</button>
+<div style="border-top:1px solid #333;padding-top:6px;margin-bottom:4px;">
+  <div class="section-toggle" data-target="clipSection" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:4px 0;">
+    <span style="color:#aaa;font-size:11px;">▶ 📦 裁剪M3U8文件</span>
+  </div>
+  <div id="clipSection" style="display:none;padding:4px 0 8px 0;">
+    <div style="display:flex;gap:4px;flex-wrap:wrap;">
+      <button id="btnGenClip" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">生成裁剪M3U8</button>
+      <button id="btnCopyClip" style="flex:1;padding:5px;background:#26c;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">复制裁剪文本</button>
+      <button id="btnDownload" style="flex:1;padding:5px;background:#2c6;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;min-width:100px;">下载clip.m3u8</button>
+    </div>
   </div>
 </div>
 
@@ -340,16 +351,15 @@
 
         const $ = sel => panel.querySelector(sel);
         const m3u8Input = $("#m3u8Input");
-        const m3u8Text = $("#m3u8Text");
+        const statSection = $("#statSection");
         const statArea = $("#statArea");
         const timeRangeList = $("#timeRangeList");
         const btnAddRange = $("#btnAddRange");
         const btnParse = $("#btnParse");
-        const btnParseText = $("#btnParseText");
         const btnPreview = $("#btnPreview");
         const btnGenRegex = $("#btnGenRegex");
         const filterInfo = $("#filterInfo");
-        const regexArea = $("#regexArea");
+        const regexSection = $("#regexSection");
         const regexOutput = $("#regexOutput");
         const btnCopyRegex = $("#btnCopyRegex");
         const btnCopyUrls = $("#btnCopyUrls");
@@ -363,6 +373,22 @@
             if (color) infoText.style.color = color;
             else infoText.style.color = '#faa';
         }
+
+        // 折叠/展开功能
+        panel.querySelectorAll('.section-toggle').forEach(toggle => {
+            toggle.onclick = () => {
+                const targetId = toggle.dataset.target;
+                const section = panel.querySelector(`#${targetId}`);
+                const titleSpan = toggle.querySelector('span');
+                if (section.style.display === 'none') {
+                    section.style.display = 'block';
+                    titleSpan.textContent = titleSpan.textContent.replace('▶', '▼');
+                } else {
+                    section.style.display = 'none';
+                    titleSpan.textContent = titleSpan.textContent.replace('▼', '▶');
+                }
+            };
+        });
 
         function renderTimeRanges() {
             timeRangeList.innerHTML = timeRanges.map((r, i) => buildTimeRangeRow(r.start, r.end, i)).join('');
@@ -443,11 +469,11 @@
             let extraInfo = '';
             if (mapLine) extraInfo += ' | fMP4流';
             if (hasDiscontinuity) extraInfo += ' | 含不连续标记';
-            statArea.style.display = 'block';
-            statArea.innerHTML = `✅ 解析完成（${sourceType}）<br>总分片：<b style="color:#fff">${segList.length}</b> 个 | 总时长：<b style="color:#fff">${secToTime(totalDur)}</b><br>平均分片：<b style="color:#fff">${avgDur.toFixed(1)}s</b> | TARGETDURATION: ${targetDuration}${extraInfo}`;
+            statSection.style.display = 'block';
+            statArea.innerHTML = `总分片：<b style="color:#fff">${segList.length}</b> 个 | 总时长：<b style="color:#fff">${secToTime(totalDur)}</b><br>平均分片：<b style="color:#fff">${avgDur.toFixed(1)}s</b> | TARGETDURATION: ${targetDuration}${extraInfo}`;
             showMsg("✅ 解析成功，请设置时间段", '#8f8');
             filterInfo.style.display = 'none';
-            regexArea.style.display = 'none';
+            regexSection.style.display = 'none';
         }
 
         btnParse.onclick = async () => {
@@ -459,15 +485,8 @@
                 const txt = await res.text();
                 doParse(txt, url, '链接');
             } catch (err) {
-                showMsg(`❌ 跨域/链接失效：${err.message}，请尝试粘贴文本解析`, '#f66');
+                showMsg(`❌ 跨域/链接失效：${err.message}`, '#f66');
             }
-        };
-
-        btnParseText.onclick = () => {
-            const txt = m3u8Text.value.trim();
-            if (!txt) { showMsg("⚠️ 请粘贴m3u8文本内容"); return; }
-            const url = m3u8Input.value.trim() || 'http://localhost/';
-            doParse(txt, url, '文本');
         };
 
         function syncFilter() {
@@ -491,16 +510,16 @@
         btnGenRegex.onclick = () => {
             if (rawSegList.length === 0) { showMsg("⚠️ 请先解析M3U8"); return; }
             if (!syncFilter()) return;
-            if (filteredSegList.length === 0) { showMsg("⚠️ 筛选结果为空，请调整时间段", '#f66'); regexArea.style.display = 'none'; return; }
+            if (filteredSegList.length === 0) { showMsg("⚠️ 筛选结果为空，请调整时间段", '#f66'); regexSection.style.display = 'none'; return; }
             const regex = generateRegexFromSegList(filteredSegList, timeRanges);
             if (!regex) {
                 showMsg("❌ 无法生成正则", '#f66');
-                regexArea.style.display = 'none';
+                regexSection.style.display = 'none';
                 return;
             }
             regexResult = regex;
             regexOutput.value = regex;
-            regexArea.style.display = 'block';
+            regexSection.style.display = 'block';
             showMsg("✅ 正则生成成功", '#8f8');
         };
 
