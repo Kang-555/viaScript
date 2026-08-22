@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         新标签预览
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.5
 // @description  嗅探 m3u8/mp4 视频资源，点击即可在新标签页预览播放
 // @license      MIT
 // @match        *://*/*
@@ -21,12 +21,49 @@
     const Config = {
         scanInterval: 2000,
         uiId: 'gm-sniffer-v23-ts',
+        hlsJsUrl: 'https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js',
         colors: {
             primary: window.self === window.top ? '#4caf50' : '#e91e63',
             background: 'rgba(0, 0, 0, 0.9)',
             text: '#ffffff'
         }
     };
+
+    // ==========================================
+    // 1.1 HlsLoader：预加载并缓存 hls.js（规避 blob 沙盒限制）
+    // ==========================================
+    const HlsLoader = {
+        _promise: null,
+        _code: '',
+        _loaded: false,
+
+        load() {
+            if (this._loaded) return Promise.resolve(this._code);
+            if (this._promise) return this._promise;
+            this._promise = new Promise((resolve) => {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: Config.hlsJsUrl,
+                    responseType: 'text',
+                    timeout: 15000,
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300 && res.response) {
+                            this._code = res.response;
+                            this._loaded = true;
+                        }
+                        resolve(this._code);
+                    },
+                    onerror: () => resolve(this._code),
+                    ontimeout: () => resolve(this._code)
+                });
+            });
+            return this._promise;
+        },
+
+        get code() { return this._code; },
+        get loaded() { return this._loaded; }
+    };
+    HlsLoader.load();
 
     // ==========================================
     // 2. 工具函数库
@@ -111,8 +148,17 @@
     // ==========================================
     // 3. 预览页面：在新标签页打开 HLS 播放器
     // ==========================================
-    const openPreviewPage = (url, type, extraInfo = {}) => {
+    const openPreviewPage = async (url, type, extraInfo = {}) => {
         const safeTitle = (document.title || 'video').replace(/[\/\\:*?"<>|]/g, ' ').trim();
+        await HlsLoader.load();
+        const hlsCode = HlsLoader.code.replace(/<\/script>/gi, '<\\/script>');
+
+        // 修复：先打开空白标签，再写入内容，避免白屏
+        const win = window.open('', '_blank');
+        if (!win) {
+            alert('无法打开新标签页，请检查浏览器弹窗拦截设置');
+            return;
+        }
 
         if (type === 'm3u8') {
             const html = `<!DOCTYPE html>
@@ -126,11 +172,15 @@
 html,body{width:100%;min-height:100vh}
 body{font-family:system-ui,-apple-system,sans-serif;font-size:14px;background:#1a1a2e;color:#eee;-webkit-text-size-adjust:100%}
 video{display:block;width:100vw;height:auto;background:#000;line-height:0}
-.loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);color:#fff;z-index:9998;font-size:14px}
-.loading.hidden{display:none}
-.spinner{width:36px;height:36px;border:3px solid #333;border-top-color:#4caf50;border-radius:50%;animation:spin 0.8s linear infinite;margin-right:10px}
+.overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);color:#fff;z-index:9998}
+.overlay.hidden{display:none}
+.spinner{width:36px;height:36px;border:3px solid #333;border-top-color:#4caf50;border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:14px}
 @keyframes spin{to{transform:rotate(360deg)}}
+.tap-icon{width:70px;height:70px;border-radius:50%;background:rgba(76,175,80,0.9);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:0 4px 20px rgba(0,0,0,0.4)}
+.tap-icon svg{width:28px;height:28px;fill:#fff;margin-left:4px}
+.tap-text{font-size:16px;font-weight:500}
 .error{padding:40px;text-align:center;color:#ff6b6b}
+.error a{color:#2196F3;text-decoration:underline}
 .header{padding:12px;background:#16213e}
 .header h2{color:#4caf50;font-size:16px}
 .info{padding:12px;background:#1a1a2e;display:grid;grid-template-columns:1fr;gap:8px}
@@ -145,8 +195,11 @@ a{color:#2196F3}
 </style>
 </head>
 <body>
-<video id="player" controls autoplay playsinline webkit-playsinline></video>
-<div id="loading" class="loading"><div class="spinner"></div><span>视频加载中...</span></div>
+<video id="player" controls playsinline webkit-playsinline></video>
+<div id="overlay" class="overlay">
+  <div class="spinner"></div>
+  <div id="overlayText">视频加载中...</div>
+</div>
 <button class="back-btn" onclick="window.close()">关闭</button>
 <div class="header"><h2>M3U8 预览</h2></div>
 <div class="info">
@@ -155,54 +208,86 @@ a{color:#2196F3}
 <div><span class="label">分片总数：</span><br><span class="value">${extraInfo.segmentCount ?? '—'}</span></div>
 <div><span class="label">总时长：</span><br><span class="value">${extraInfo.duration ? extraInfo.duration.toFixed(1) + ' 秒' : '—'}</span></div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script>
+<script>${hlsCode}</script>
 <script>
 (function(){
   var video = document.getElementById('player');
-  var loading = document.getElementById('loading');
+  var overlay = document.getElementById('overlay');
+  var overlayText = document.getElementById('overlayText');
 
-  function hideLoading(){ loading.classList.add('hidden'); }
+  function hideOverlay(){ overlay.classList.add('hidden'); }
+  function showTap(){
+    overlay.innerHTML = '<div class="tap-icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div><div class="tap-text">点击播放</div>';
+    overlay.classList.remove('hidden');
+    overlay.addEventListener('click', function(){
+      hideOverlay();
+      video.play().catch(function(){});
+    }, {once:true});
+  }
   function showError(msg){
-    hideLoading();
-    var div = document.createElement('div');
-    div.className = 'error';
-    div.textContent = msg;
-    document.body.appendChild(div);
+    overlay.innerHTML = '<div class="error">' + msg + '</div>';
+    overlay.classList.remove('hidden');
   }
 
-  video.addEventListener('playing', hideLoading);
+  video.addEventListener('playing', hideOverlay);
   video.addEventListener('error', function(){
-    hideLoading();
-    showError('视频加载失败，点击查看<a href="${url}" target="_blank">原始地址</a>');
+    hideOverlay();
+    showError('视频加载失败，<a href="${url}" target="_blank">点击查看原始地址</a>');
   });
+  video.addEventListener('autoplayfailed', showTap);
 
-  if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-    var hls = new Hls();
+  var hasHls = typeof Hls !== 'undefined' && Hls.isSupported();
+  var hls = null;
+
+  function tryAutoPlay(){
+    video.play().then(function(){
+      hideOverlay();
+    }).catch(function(){
+      showTap();
+    });
+  }
+
+  if (hasHls) {
+    hls = new Hls();
     hls.loadSource(${JSON.stringify(url)});
     hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, function(){ video.play().catch(function(){}); });
+    hls.on(Hls.Events.MANIFEST_PARSED, function(){
+      tryAutoPlay();
+      setTimeout(function(){
+        if (hls) {
+          hls.destroy();
+          hls = new Hls();
+          hls.loadSource(${JSON.stringify(url)});
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, function(){ video.play().catch(function(){}); });
+        }
+      }, 800);
+    });
     hls.on(Hls.Events.ERROR, function(evt, data){
       if (data.fatal) {
         hls.destroy();
         video.src = ${JSON.stringify(url)};
-        video.play().catch(function(){});
+        tryAutoPlay();
       }
     });
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = ${JSON.stringify(url)};
-    video.play().catch(function(){});
+    tryAutoPlay();
+    video.addEventListener('loadeddata', function(){
+      setTimeout(function(){ video.load(); video.play().catch(function(){}); }, 800);
+    }, {once:true});
   } else {
-    hideLoading();
-    showError('当前浏览器不支持 HLS 播放，请使用支持 HLS 的浏览器或开启电脑模式');
+    hideOverlay();
+    showError('当前浏览器不支持 HLS 播放，请使用支持 HLS 的浏览器');
   }
 })();
 </script>
 </body>
 </html>`;
-            const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-            const previewUrl = URL.createObjectURL(blob);
-            window.open(previewUrl, '_blank');
-            setTimeout(() => URL.revokeObjectURL(previewUrl), 60000);
+            // 直接写入新窗口，避免 Blob URL 加载时序问题
+            win.document.open();
+            win.document.write(html);
+            win.document.close();
         } else {
             const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -215,6 +300,15 @@ a{color:#2196F3}
 html,body{width:100%;min-height:100vh}
 body{font-family:system-ui,-apple-system,sans-serif;font-size:14px;background:#1a1a2e;color:#eee;-webkit-text-size-adjust:100%}
 video{display:block;width:100vw;height:auto;background:#000;line-height:0}
+.overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);color:#fff;z-index:9998}
+.overlay.hidden{display:none}
+.spinner{width:36px;height:36px;border:3px solid #333;border-top-color:#4caf50;border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tap-icon{width:70px;height:70px;border-radius:50%;background:rgba(76,175,80,0.9);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:0 4px 20px rgba(0,0,0,0.4)}
+.tap-icon svg{width:28px;height:28px;fill:#fff;margin-left:4px}
+.tap-text{font-size:16px;font-weight:500}
+.error{padding:40px;text-align:center;color:#ff6b6b}
+.error a{color:#2196F3;text-decoration:underline}
 .header{padding:12px;background:#16213e}
 .header h2{color:#4caf50;font-size:16px}
 .info{padding:12px;background:#1a1a2e}
@@ -225,22 +319,57 @@ a{color:#2196F3}
 </style>
 </head>
 <body>
-<video id="player" controls autoplay playsinline webkit-playsinline src="${url}"></video>
+<video id="player" controls playsinline webkit-playsinline src="${url}"></video>
+<div id="overlay" class="overlay">
+  <div class="spinner"></div>
+  <div>视频加载中...</div>
+</div>
 <button class="back-btn" onclick="window.close()">关闭</button>
 <div class="header"><h2>视频预览</h2></div>
 <div class="info">
 <p><span class="label">原始地址：</span><br><a target="_blank" href="${url}">${url}</a></p>
 </div>
 <script>
-const video = document.getElementById('player');
-video.play().catch(() => {});
+(function(){
+  var video = document.getElementById('player');
+  var overlay = document.getElementById('overlay');
+
+  function hideOverlay(){ overlay.classList.add('hidden'); }
+  function showTap(){
+    overlay.innerHTML = '<div class="tap-icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div><div class="tap-text">点击播放</div>';
+    overlay.classList.remove('hidden');
+    overlay.addEventListener('click', function(){
+      hideOverlay();
+      video.play().catch(function(){});
+    }, {once:true});
+  }
+  function showError(msg){
+    overlay.innerHTML = '<div class="error">' + msg + '</div>';
+    overlay.classList.remove('hidden');
+  }
+
+  video.addEventListener('playing', hideOverlay);
+  video.addEventListener('error', function(){
+    hideOverlay();
+    showError('视频加载失败，<a href="${url}" target="_blank">点击查看原始地址</a>');
+  });
+
+  video.play().then(function(){
+    hideOverlay();
+  }).catch(function(){
+    showTap();
+  });
+  video.addEventListener('loadeddata', function(){
+    setTimeout(function(){ video.load(); video.play().catch(function(){}); }, 800);
+  }, {once:true});
+})();
 </script>
 </body>
 </html>`;
-            const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-            const previewUrl = URL.createObjectURL(blob);
-            window.open(previewUrl, '_blank');
-            setTimeout(() => URL.revokeObjectURL(previewUrl), 60000);
+            // 直接写入新窗口，避免 Blob URL 加载时序问题
+            win.document.open();
+            win.document.write(html);
+            win.document.close();
         }
     };
 
