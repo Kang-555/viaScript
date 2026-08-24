@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      5.4
-// @description  修复嗅探失效，简化面板；网页m3u8嗅探、可视化拖拽选段预览、AES-128解密、分片拼接TS、手机电脑通用
+// @version      6.0
+// @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
 // @match        *://*/*
@@ -774,7 +774,7 @@
     };
 
     // ==========================================
-    // 可视化拖拽选段弹窗
+    // 全屏选段工作台弹窗
     // ==========================================
     async function openPreviewSelectSegment(m3u8Url, existingSegments = []) {
         await loadHlsScript();
@@ -784,21 +784,42 @@
         const overlay = createElement('div', {
             style: {
                 position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
-                background: '#000', zIndex: '999999', overflowY: 'auto'
+                background: '#0a0a0a', zIndex: '999999', overflowY: 'auto',
+                display: 'flex', flexDirection: 'column'
             }
         });
-        const closeBtn = createElement('button', {
-            style: { position: 'fixed', top: 10, right: 10, zIndex: 100, padding: '4px 10px' }
-        }, "关闭");
 
-        const videoWrap = createElement('div', { style: { position: 'relative', width: '100%', background: '#000' } });
+        const header = createElement('div', {
+            style: {
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '12px 16px', background: 'linear-gradient(90deg,#1b5e20,#2e7d32)',
+                color: '#fff', position: 'sticky', top: 0, zIndex: 10
+            }
+        }, [
+            createElement('span', { style: { fontSize: '16px', fontWeight: 'bold' } }, `📺 视频选段工作台`),
+            createElement('div', { style: { display: 'flex', gap: '12px', alignItems: 'center' } }, [
+                createElement('span', { style: { fontSize: '13px', opacity: 0.9 } }, `${existingSegments.length} 段已选`),
+                createElement('button', {
+                    style: {
+                        background: 'none', border: 'none', color: '#fff',
+                        fontSize: '20px', cursor: 'pointer', padding: '0 4px'
+                    }
+                }, "✕")
+            ])
+        ]);
+
+        const mainContent = createElement('div', {
+            style: { flex: 1, padding: '16px', color: '#fff', maxWidth: '800px', margin: '0 auto', width: '100%', boxSizing: 'border-box' }
+        });
+
+        const videoWrap = createElement('div', {
+            style: { background: '#000', borderRadius: '8px', overflow: 'hidden', marginBottom: '16px' }
+        });
         const video = createElement('video', {
             controls: true, autoplay: true, playsinline: true,
-            style: { width: '100%', maxHeight: '50vh', display: 'block', background: '#000' }
+            style: { width: '100%', maxHeight: '45vh', display: 'block', background: '#000' }
         });
         videoWrap.appendChild(video);
-
-        const editorWrap = createElement('div', { style: { background: '#1a1a1a', color: '#fff', padding: '14px' } });
 
         let hlsInst = null;
         if (Hls.isSupported()) {
@@ -813,126 +834,287 @@
         let endSec = Math.min(60, totalDuration || 1);
         const safeTotal = totalDuration || 1;
 
-        const t1Text = createElement('div', { style: { fontSize: '13px', marginBottom: '4px' } }, `起始：${formatTimeHMS(startSec)}`);
-        const t2Text = createElement('div', { style: { fontSize: '13px', marginBottom: '4px' } }, `结束：${formatTimeHMS(endSec)}`);
-        const durText = createElement('div', { style: { fontSize: '11px', color: '#888', marginBottom: '10px' } },
-            `总时长：${formatTimeHMS(totalDuration)} | 已选：${formatTimeHMS(endSec - startSec)} | ${parseRet.segments.length}分片`);
+        const infoRow = createElement('div', {
+            style: {
+                display: 'flex', justifyContent: 'space-between',
+                padding: '10px 14px', background: '#1a1a1a', borderRadius: '6px',
+                marginBottom: '16px', fontSize: '13px', color: '#ccc'
+            }
+        }, [
+            createElement('span', {}, `总时长：${formatTimeHMS(totalDuration)}`),
+            createElement('span', {}, `${parseRet.segments.length} 分片`),
+            createElement('span', { style: { color: '#4caf50' } }, `已选：${formatTimeHMS(endSec - startSec)}`)
+        ]);
 
-        function buildSlider(labelText, initialPct, onChange) {
-            initialPct = Math.max(0, Math.min(1, initialPct));
-            const wrap = createElement('div', { style: { margin: '10px 0' } });
-            const label = createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px', color: '#aaa' } }, [
-                createElement('span', {}, labelText),
-                createElement('span', {}, `${formatTimeHMS(initialPct * safeTotal)}`)
-            ]);
-            const track = createElement('div', { style: { width: '100%', height: '8px', background: '#333', borderRadius: '4px', position: 'relative', cursor: 'pointer' } });
-            const fill = createElement('div', { style: { position: 'absolute', height: '100%', background: '#4caf50', borderRadius: '4px', width: `${initialPct * 100}%` } });
-            const thumb = createElement('div', { style: { width: '16px', height: '16px', borderRadius: '50%', background: '#4caf50', position: 'absolute', top: '-4px', marginLeft: '-8px', cursor: 'grab', left: `${initialPct * 100}%`, boxShadow: '0 0 4px #000' } });
-            track.appendChild(fill);
-            track.appendChild(thumb);
-            wrap.appendChild(label);
-            wrap.appendChild(track);
+        const startSection = createElement('div', { style: { marginBottom: '18px' } });
+        const startLabel = createElement('div', { style: { fontSize: '14px', color: '#aaa', marginBottom: '6px' } }, `起始：${formatTimeHMS(startSec)}`);
 
+        const startTrack = createElement('div', {
+            style: { width: '100%', height: '10px', background: '#333', borderRadius: '5px', position: 'relative', cursor: 'pointer' }
+        });
+        const startFill = createElement('div', {
+            style: {
+                position: 'absolute', height: '100%', background: 'linear-gradient(90deg,#4caf50,#81c784)',
+                borderRadius: '5px', width: `${(startSec / safeTotal) * 100}%`
+            }
+        });
+        const startThumb = createElement('div', {
+            style: {
+                width: '20px', height: '20px', borderRadius: '50%', background: '#4caf50',
+                position: 'absolute', top: '-5px', marginLeft: '-10px', cursor: 'grab',
+                left: `${(startSec / safeTotal) * 100}%`,
+                boxShadow: '0 0 8px rgba(76,175,80,0.6)', transition: 'box-shadow 0.2s'
+            }
+        });
+        startTrack.appendChild(startFill);
+        startTrack.appendChild(startThumb);
+        startSection.appendChild(startLabel);
+        startSection.appendChild(startTrack);
+
+        const endSection = createElement('div', { style: { marginBottom: '20px' } });
+        const endLabel = createElement('div', { style: { fontSize: '14px', color: '#aaa', marginBottom: '6px' } }, `结束：${formatTimeHMS(endSec)}`);
+        const endTrack = createElement('div', {
+            style: { width: '100%', height: '10px', background: '#333', borderRadius: '5px', position: 'relative', cursor: 'pointer' }
+        });
+        const endFill = createElement('div', {
+            style: {
+                position: 'absolute', height: '100%', background: 'linear-gradient(90deg,#4caf50,#81c784)',
+                borderRadius: '5px', width: `${(endSec / safeTotal) * 100}% `
+            }
+        });
+        const endThumb = createElement('div', {
+            style: {
+                width: '20px', height: '20px', borderRadius: '50%', background: '#4caf50',
+                position: 'absolute', top: '-5px', marginLeft: '-10px', cursor: 'grab',
+                left: `${(endSec / safeTotal) * 100}% `,
+                boxShadow: '0 0 8px rgba(76,175,80,0.6)', transition: 'box-shadow 0.2s'
+            }
+        });
+        endTrack.appendChild(endFill);
+        endTrack.appendChild(endThumb);
+        endSection.appendChild(endLabel);
+        endSection.appendChild(endTrack);
+
+        function setupSliderInteraction(thumb, track, fill, label, setSec) {
             let dragging = false;
-            function setPos(pct) {
+            function setPos(clientX) {
+                const rect = track.getBoundingClientRect();
+                if (rect.width === 0) return;
+                let pct = (clientX - rect.left) / rect.width;
                 pct = Math.max(0, Math.min(1, pct));
                 const sec = pct * safeTotal;
-                thumb.style.left = `${pct * 100}%`;
-                fill.style.width = `${pct * 100}%`;
-                label.children[1].textContent = formatTimeHMS(sec);
-                onChange(sec);
+                thumb.style.left = `${pct * 100}% `;
+                fill.style.width = `${pct * 100}% `;
+                setSec(sec);
             }
-            function clientXToPct(clientX) {
-                const rect = track.getBoundingClientRect();
-                if (rect.width === 0) return 0;
-                return (clientX - rect.left) / rect.width;
-            }
-            thumb.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); });
-            thumb.addEventListener('touchstart', (e) => { dragging = true; }, { passive: true });
+            thumb.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); thumb.style.boxShadow = '0 0 16px rgba(76,175,80,1)'; });
+            thumb.addEventListener('touchstart', (e) => { dragging = true; thumb.style.boxShadow = '0 0 16px rgba(76,175,80,1)'; }, { passive: true });
             track.addEventListener('mousedown', (e) => {
                 if (e.target === thumb) return;
-                setPos(clientXToPct(e.clientX));
+                setPos(e.clientX);
             });
-            document.addEventListener('mousemove', (e) => { if (dragging) setPos(clientXToPct(e.clientX)); });
+            document.addEventListener('mousemove', (e) => { if (dragging) setPos(e.clientX); });
             document.addEventListener('touchmove', (e) => {
-                if (dragging) setPos(clientXToPct(e.touches[0].clientX));
+                if (dragging) setPos(e.touches[0].clientX);
             }, { passive: true });
-            document.addEventListener('mouseup', () => dragging = false);
-            document.addEventListener('touchend', () => dragging = false);
-            return { wrap, setPos };
+            const endDrag = () => {
+                dragging = false;
+                thumb.style.boxShadow = '0 0 8px rgba(76,175,80,0.6)';
+            };
+            document.addEventListener('mouseup', endDrag);
+            document.addEventListener('touchend', endDrag);
         }
 
-        const sliderStart = buildSlider("起始时间", startSec / safeTotal, (sec) => {
+        setupSliderInteraction(startThumb, startTrack, startFill, startLabel, (sec) => {
             startSec = Math.min(sec, endSec);
+            startThumb.style.left = `${(startSec / safeTotal) * 100}% `;
+            startFill.style.width = `${(startSec / safeTotal) * 100}% `;
+            startLabel.textContent = `起始：${formatTimeHMS(startSec)} `;
             video.currentTime = startSec;
-            t1Text.textContent = `起始：${formatTimeHMS(startSec)}`;
-            durText.textContent = `总时长：${formatTimeHMS(totalDuration)} | 已选：${formatTimeHMS(endSec - startSec)} | ${parseRet.segments.length}分片`;
+            updateInfoRow();
         });
-        const sliderEnd = buildSlider("结束时间", endSec / safeTotal, (sec) => {
+
+        setupSliderInteraction(endThumb, endTrack, endFill, endLabel, (sec) => {
             endSec = Math.max(sec, startSec);
+            endThumb.style.left = `${(endSec / safeTotal) * 100}% `;
+            endFill.style.width = `${(endSec / safeTotal) * 100}% `;
+            endLabel.textContent = `结束：${formatTimeHMS(endSec)} `;
             video.currentTime = endSec;
-            t2Text.textContent = `结束：${formatTimeHMS(endSec)}`;
-            durText.textContent = `总时长：${formatTimeHMS(totalDuration)} | 已选：${formatTimeHMS(endSec - startSec)} | ${parseRet.segments.length}分片`;
+            updateInfoRow();
         });
 
-        const confirmBtn = createElement('button', {
-            style: { marginTop: '10px', padding: '8px 14px', background: '#4caf50', border: 'none', borderRadius: '4px', fontWeight: 'bold', width: '100%', fontSize: '14px' }
-        }, "✅确定回填时间");
+        function updateInfoRow() {
+            infoRow.children[2].textContent = `已选：${formatTimeHMS(endSec - startSec)} `;
+        }
 
-        // 已添加时间段列表
-        const existingList = createElement('div', {
-            style: { marginTop: '12px', borderTop: '1px solid #333', paddingTop: '8px' }
+        const addBtn = createElement('button', {
+            style: {
+                width: '100%', padding: '12px',
+                background: 'linear-gradient(135deg,#4caf50,#45a049)',
+                color: '#fff', border: 'none', borderRadius: '8px',
+                fontSize: '15px', fontWeight: 'bold', cursor: 'pointer',
+                marginBottom: '24px',
+                boxShadow: '0 2px 8px rgba(76,175,80,0.3)',
+                transition: 'transform 0.1s, box-shadow 0.2s'
+            },
+            onmouseover: (e) => {
+                e.target.style.transform = 'translateY(-1px)';
+                e.target.style.boxShadow = '0 4px 12px rgba(76,175,80,0.4)';
+            },
+            onmouseout: (e) => {
+                e.target.style.transform = 'translateY(0)';
+                e.target.style.boxShadow = '0 2px 8px rgba(76,175,80,0.3)';
+            }
+        }, "✅ 添加到列表");
+
+        const segSection = createElement('div', {
+            style: { borderTop: '1px solid #333', paddingTop: '16px', marginBottom: '20px' }
         });
-        if (existingSegments.length > 0) {
-            const title = createElement('div', { style: { fontSize: '12px', color: '#aaa', marginBottom: '6px' } }, `已添加时间段 (${existingSegments.length}段)：`);
-            existingList.appendChild(title);
-            existingSegments.forEach((seg, i) => {
+        const segTitle = createElement('div', {
+            style: {
+                textAlign: 'center', fontSize: '12px', color: '#888',
+                marginBottom: '12px',
+                display: 'flex', alignItems: 'center', gap: '10px',
+                justifyContent: 'center'
+            }
+        }, [
+            createElement('span', { style: { flex: 1, height: '1px', background: '#333' } }),
+            createElement('span', {}, `── 已选时间段(${existingSegments.length}段) ──`),
+            createElement('span', { style: { flex: 1, height: '1px', background: '#333' } })
+        ]);
+
+        const segListContainer = createElement('div', {
+            style: {
+                background: '#111', borderRadius: '8px', padding: '12px',
+                maxHeight: '200px', overflowY: 'auto'
+            }
+        });
+
+        function renderSegList(segments) {
+            segListContainer.innerHTML = '';
+            if (segments.length === 0) {
+                segListContainer.innerHTML = '<div style="color:#666;padding:12px;text-align:center;font-size:13px">暂无时间段，拖拽滑块选择后添加</div>';
+                return;
+            }
+            segments.forEach((seg, i) => {
                 const row = createElement('div', {
-                    style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '3px 0', fontSize: '11px' }
-                });
-                const num = createElement('span', { style: { color: '#4caf50', fontWeight: 'bold' } }, `${i + 1}.`);
-                const time = createElement('span', { style: { flex: 1 } }, `${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)}`);
-                const dur = createElement('span', { style: { color: '#888' } }, `${seg.duration.toFixed(1)}s`);
-                row.appendChild(num);
-                row.appendChild(time);
-                row.appendChild(dur);
-                existingList.appendChild(row);
+                    style: {
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        padding: '8px 12px', background: '#1a1a1a',
+                        borderRadius: '6px', marginBottom: '6px',
+                        borderLeft: '3px solid #4caf50'
+                    }
+                }, [
+                    createElement('span', { style: { color: '#4caf50', fontWeight: 'bold', minWidth: '24px' } }, `${i + 1}.`),
+                    createElement('span', { style: { flex: 1, fontSize: '13px' } }, `${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)} `),
+                    createElement('span', { style: { color: '#888', fontSize: '12px' } }, `${seg.duration.toFixed(1)} s`),
+                    createElement('button', {
+                        style: {
+                            background: 'rgba(244,67,54,0.2)', border: 'none',
+                            color: '#f44336', borderRadius: '4px',
+                            padding: '4px 8px', cursor: 'pointer',
+                            fontSize: '14px', lineHeight: 1
+                        }
+                    }, "✕")
+                ]);
+                row.children[3].onclick = () => {
+                    const idx = existingSegments.findIndex(s => s.id === seg.id);
+                    if (idx >= 0) existingSegments.splice(idx, 1);
+                    renderSegList(existingSegments);
+                    segTitle.children[1].textContent = `── 已选时间段(${existingSegments.length}段) ──`;
+                };
+                segListContainer.appendChild(row);
             });
         }
 
-        editorWrap.appendChild(durText);
-        editorWrap.appendChild(t1Text);
-        editorWrap.appendChild(sliderStart.wrap);
-        editorWrap.appendChild(t2Text);
-        editorWrap.appendChild(sliderEnd.wrap);
-        editorWrap.appendChild(confirmBtn);
-        editorWrap.appendChild(existingList);
+        renderSegList(existingSegments);
 
-        overlay.appendChild(closeBtn);
-        overlay.appendChild(videoWrap);
-        overlay.appendChild(editorWrap);
+        const bottomBar = createElement('div', {
+            style: {
+                display: 'flex', gap: '12px',
+                padding: '16px', background: '#1a1a1a',
+                borderRadius: '8px'
+            }
+        }, [
+            createElement('button', {
+                style: {
+                    flex: 1, padding: '12px',
+                    background: '#333', color: '#ccc',
+                    border: 'none', borderRadius: '6px',
+                    fontSize: '14px', cursor: 'pointer'
+                }
+            }, "🗑 清空"),
+            createElement('button', {
+                style: {
+                    flex: 2, padding: '12px',
+                    background: 'linear-gradient(135deg,#2196f3,#1976d2)',
+                    color: '#fff', border: 'none', borderRadius: '6px',
+                    fontSize: '14px', fontWeight: 'bold',
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 8px rgba(33,150,243,0.3)'
+                }
+            }, `📥 开始下载(${existingSegments.length})`)
+        ]);
+
+        mainContent.appendChild(videoWrap);
+        mainContent.appendChild(infoRow);
+        mainContent.appendChild(startSection);
+        mainContent.appendChild(endSection);
+        mainContent.appendChild(addBtn);
+        mainContent.appendChild(segSection);
+        segSection.appendChild(segTitle);
+        segSection.appendChild(segListContainer);
+        mainContent.appendChild(bottomBar);
+
+        overlay.appendChild(header);
+        overlay.appendChild(mainContent);
         document.body.appendChild(overlay);
 
         function closeOverlay() {
             if (hlsInst) hlsInst.destroy();
             overlay.remove();
         }
-        closeBtn.onclick = closeOverlay;
+
+        addBtn.onclick = () => {
+            const newSeg = {
+                id: 'seg_' + Math.random().toString(36).slice(2, 6),
+                startSec: startSec,
+                endSec: endSec,
+                duration: endSec - startSec
+            };
+            existingSegments.push(newSeg);
+            renderSegList(existingSegments);
+            segTitle.children[1].textContent = `── 已选时间段(${existingSegments.length}段) ──`;
+            header.children[1].children[0].textContent = `${existingSegments.length} 段已选`;
+            return newSeg;
+        };
 
         return new Promise((resolve) => {
-            confirmBtn.onclick = () => {
+            bottomBar.children[0].onclick = () => {
+                existingSegments.length = 0;
+                renderSegList(existingSegments);
+                segTitle.children[1].textContent = `── 已选时间段(0段) ──`;
+                header.children[1].children[0].textContent = `0 段已选`;
+            };
+
+            bottomBar.children[1].onclick = () => {
+                if (existingSegments.length === 0) {
+                    alert('请先添加时间段');
+                    return;
+                }
                 closeOverlay();
-                resolve({
-                    startHms: formatTimeHMS(startSec),
-                    endHms: formatTimeHMS(endSec),
-                    startSec, endSec
-                });
+                resolve({ segments: [...existingSegments], confirmed: true });
+            };
+
+            header.children[1].children[1].onclick = () => {
+                closeOverlay();
+                resolve({ segments: [...existingSegments], confirmed: false });
             };
         });
     }
 
     // ==========================================
-    // 简化UI面板（移除shadow DOM）
+    // 主面板（资源列表）
     // ==========================================
     class SimpleUI {
         constructor() {
@@ -957,31 +1139,78 @@
             this.toggleBtn = createElement('button', {
                 id: 'm3u8-sniffer-toggle',
                 style: {
-                    position: 'fixed', bottom: '16px', left: '16px', width: '44px', height: '44px',
-                    borderRadius: '50%', background: '#4caf50', border: 'none', zIndex: '999990',
-                    fontWeight: 'bold', fontSize: '16px', boxShadow: '0 2px 10px #0006',
-                    color: '#fff', cursor: 'pointer', transition: 'transform 0.15s'
+                    position: 'fixed', bottom: '16px', left: '16px', width: '48px', height: '48px',
+                    borderRadius: '50%',
+                    background: 'linear-gradient(135deg,#4caf50,#2e7d32)',
+                    border: 'none', zIndex: '999990',
+                    fontWeight: 'bold', fontSize: '18px',
+                    boxShadow: '0 4px 16px rgba(76,175,80,0.4)',
+                    color: '#fff', cursor: 'pointer',
+                    transition: 'transform 0.15s, box-shadow 0.2s'
+                },
+                onmouseover: (e) => {
+                    e.target.style.transform = 'scale(1.05)';
+                    e.target.style.boxShadow = '0 6px 20px rgba(76,175,80,0.5)';
+                },
+                onmouseout: (e) => {
+                    e.target.style.transform = 'scale(1)';
+                    e.target.style.boxShadow = '0 4px 16px rgba(76,175,80,0.4)';
                 }
             }, "🎬");
 
             this.panel = createElement('div', {
                 id: 'm3u8-sniffer-panel',
                 style: {
-                    position: 'fixed', bottom: '68px', left: '16px', width: 'min(360px, calc(100vw-32px))',
-                    background: 'rgba(0,0,0,0.88)', color: '#fff', borderRadius: '10px',
-                    border: '1px solid #4caf50', zIndex: '999990', display: 'none', fontSize: '12px',
-                    maxHeight: '75vh', overflow: 'hidden', backdropFilter: 'blur(6px)',
-                    boxShadow: '0 4px 20px #0008'
+                    position: 'fixed', bottom: '74px', left: '16px',
+                    width: 'min(380px, calc(100vw - 32px))',
+                    background: 'rgba(20, 20, 20, 0.95)',
+                    color: '#fff',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(76,175,80,0.3)',
+                    zIndex: '999990',
+                    display: 'none',
+                    fontSize: '12px',
+                    maxHeight: '75vh',
+                    overflow: 'hidden',
+                    backdropFilter: 'blur(10px)',
+                    boxShadow: '0 8px 32px rgba(0,0,0,0.5)'
                 }
             });
-            this.countEl = createElement('span', { style: { fontSize: '11px', opacity: '0.8' } }, "0 个资源");
+
+            this.countEl = createElement('span', {
+                style: {
+                    fontSize: '12px',
+                    opacity: 0.9,
+                    background: 'rgba(255,255,255,0.15)',
+                    padding: '2px 10px',
+                    borderRadius: '10px'
+                }
+            }, "0 个资源");
+
             const head = createElement('div', {
-                style: { padding: '10px 12px', background: 'linear-gradient(90deg,#1b5e20,#2e7d32)', fontWeight: 'bold', color: '#fff', borderRadius: '10px 10px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }
+                style: {
+                    padding: '12px 14px',
+                    background: 'linear-gradient(90deg,#1b5e20,#2e7d32)',
+                    fontWeight: 'bold',
+                    color: '#fff',
+                    borderRadius: '12px 12px 0 0',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center'
+                }
             }, [
-                createElement('span', {}, "🎬 视频嗅探下载器"),
+                createElement('span', { style: { fontSize: '14px' } }, "🎬 视频嗅探下载器"),
                 this.countEl
             ]);
-            this.listEl = createElement('div', { style: { overflowY: 'auto', maxHeight: '420px' } });
+
+            this.listEl = createElement('div', {
+                style: {
+                    overflowY: 'auto',
+                    maxHeight: '420px',
+                    padding: '4px 0'
+                }
+            });
+
             this.panel.appendChild(head);
             this.panel.appendChild(this.listEl);
 
@@ -1000,7 +1229,7 @@
             const exist = this.resources.some(r => r.url === url);
             if (exist) return;
             const id = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-            this.resources.unshift({ id, url, type: 'm3u8' });
+            this.resources.unshift({ id, url, type: 'm3u8', _cutSegments: [], _parsedM3u8: null });
             this.render();
         }
 
@@ -1008,108 +1237,190 @@
             this.listEl.innerHTML = '';
             this.countEl.textContent = `${this.resources.length} 个资源`;
             if (this.resources.length === 0) {
-                this.listEl.innerHTML = `<div style="padding:20px;text-align:center;color:#888">等待捕获视频资源...<br><span style="font-size:11px">播放视频时自动嗅探</span></div>`;
+                this.listEl.innerHTML = `
+        < div style = "padding:30px 20px;text-align:center;color:#666" >
+                        <div style="font-size:32px;margin-bottom:8px">🎬</div>
+                        <div>等待捕获视频资源...</div>
+                        <div style="font-size:11px;margin-top:6px;color:#555">播放视频时自动嗅探</div>
+                    </div > `;
                 return;
             }
-            this.resources.forEach((item, idx) => {
+
+            this.resources.forEach((item) => {
                 const isOpen = this.openId === item.id;
-                const itemWrap = createElement('div', { style: { borderBottom: '1px solid #333' } });
+                const segCount = item._cutSegments ? item._cutSegments.length : 0;
+                const totalDur = segCount > 0
+                    ? item._cutSegments.reduce((sum, s) => sum + s.duration, 0)
+                    : 0;
+
+                const itemWrap = createElement('div', {
+                    style: {
+                        borderBottom: '1px solid #2a2a2a',
+                        background: isOpen ? '#1a1a1a' : 'transparent',
+                        transition: 'background 0.15s'
+                    }
+                });
+
                 const titleRow = createElement('div', {
-                    style: { padding: '8px 10px', cursor: 'pointer', display: 'flex', gap: '6px', alignItems: 'center', background: isOpen ? '#1a1a1a' : 'transparent', transition: 'background 0.15s' },
+                    style: {
+                        padding: '10px 12px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        gap: '8px',
+                        alignItems: 'center'
+                    },
                     onclick: () => { this.openId = isOpen ? null : item.id; this.render(); }
                 });
+
                 const tag = createElement('span', {
                     style: {
-                        background: '#4caf50',
-                        color: '#000', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', flexShrink: '0'
+                        background: segCount > 0 ? '#ff9800' : '#4caf50',
+                        color: '#000',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        fontSize: '10px',
+                        fontWeight: 'bold',
+                        flexShrink: '0'
                     }
-                }, "m3u8");
+                }, segCount > 0 ? `${segCount} 段` : 'm3u8');
+
                 const nameSpan = createElement('span', {
-                    style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                    style: {
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontSize: '12px'
+                    },
                     title: item.url
                 }, getFilename(item.url));
-                const arrow = createElement('span', { style: { fontSize: '10px', color: '#666', transition: 'transform 0.15s', transform: isOpen ? 'rotate(90deg)' : 'none' } }, isOpen ? '▼' : '▶');
+
+                const arrow = createElement('span', {
+                    style: {
+                        fontSize: '10px',
+                        color: '#666',
+                        transition: 'transform 0.2s',
+                        transform: isOpen ? 'rotate(90deg)' : 'none'
+                    }
+                }, isOpen ? '▼' : '▶');
+
                 titleRow.appendChild(tag);
                 titleRow.appendChild(nameSpan);
                 titleRow.appendChild(arrow);
                 itemWrap.appendChild(titleRow);
 
                 if (isOpen) {
-                    const bodyWrap = createElement('div', { style: { padding: '10px', background: '#111' } });
-                    // 多段模式UI
-                    const multiRow = createElement('div', { style: { marginBottom: '6px' } });
-                    const segListContainer = createElement('div', { id: `seglist_${item.id}`, style: { maxHeight: '120px', overflowY: 'auto', background: '#0a0a0a', borderRadius: '4px', padding: '4px', marginBottom: '4px', fontSize: '11px' } });
-                    segListContainer.innerHTML = '<div style="color:#666;padding:4px">暂无时间段，点击下方按钮添加</div>';
-                    const multiBtnRow = createElement('div', { style: { display: 'flex', gap: '4px' } });
-                    const addSegBtn = createElement('button', { style: { flex: 1, padding: '4px', background: '#2196F3', border: 'none', color: '#fff', borderRadius: '3px', fontSize: '11px' } }, "➕ 预览添加时间段");
-                    const clearSegBtn = createElement('button', { style: { padding: '4px 8px', background: '#f44336', border: 'none', color: '#fff', borderRadius: '3px', fontSize: '11px' } }, "🗑 清空");
-                    multiBtnRow.appendChild(addSegBtn);
-                    multiBtnRow.appendChild(clearSegBtn);
-                    multiRow.appendChild(segListContainer);
-                    multiRow.appendChild(multiBtnRow);
-                    bodyWrap.appendChild(multiRow);
-
-                    // 存储多段数据
-                    item._cutSegments = [];
-                    item._parsedM3u8 = null;
-
-                    addSegBtn.onclick = async () => {
-                        try {
-                            if (!item._parsedM3u8) {
-                                addSegBtn.textContent = '解析中...';
-                                item._parsedM3u8 = await parseM3u8(item.url);
-                                addSegBtn.textContent = '➕ 预览添加时间段';
-                            }
-                            const res = await openPreviewSelectSegment(item.url, item._cutSegments);
-                            if (res) {
-                                const { startIdx, endIdx } = timeToSegmentIndex(item._parsedM3u8.timeList, res.startSec, res.endSec);
-                                item._cutSegments.push({
-                                    id: 'seg_' + Math.random().toString(36).slice(2, 6),
-                                    startSec: res.startSec,
-                                    endSec: res.endSec,
-                                    startIdx,
-                                    endIdx,
-                                    duration: res.endSec - res.startSec
-                                });
-                                renderSegList(item.id, item._cutSegments);
-                            }
-                        } catch (e) { alert("添加失败:" + e.message); }
-                    };
-
-                    clearSegBtn.onclick = () => {
-                        item._cutSegments = [];
-                        renderSegList(item.id, item._cutSegments);
-                    };
-
-                    function renderSegList(itemId, segments) {
-                        const container = document.getElementById(`seglist_${itemId}`);
-                        if (!container) return;
-                        if (segments.length === 0) {
-                            container.innerHTML = '<div style="color:#666;padding:4px">暂无时间段，点击下方按钮添加</div>';
-                            return;
+                    const bodyWrap = createElement('div', {
+                        style: {
+                            padding: '12px',
+                            background: '#0f0f0f'
                         }
-                        const totalDur = segments.reduce((sum, s) => sum + s.duration, 0);
-                        const totalSegs = segments.reduce((sum, s) => sum + (s.endIdx - s.startIdx + 1), 0);
-                        container.innerHTML = segments.map((seg, i) => `
-                                <div style="display:flex;align-items:center;gap:4px;padding:3px 4px;border-bottom:1px solid #222">
-                                    <span style="color:#4caf50;font-weight:bold">${i + 1}.</span>
-                                    <span style="flex:1">${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)}</span>
-                                    <span style="color:#888">${seg.duration.toFixed(1)}s</span>
-                                    <button data-seg-id="${seg.id}" style="background:#f44336;border:none;color:#fff;border-radius:2px;padding:1px 5px;font-size:10px;cursor:pointer">×</button>
-                                </div>
-                            `).join('') + `<div style="color:#4caf50;padding:4px;font-weight:bold">合计: ${segments.length}段 | ${formatTimeHMS(totalDur)} | ~${totalSegs}分片</div>`;
-                        container.querySelectorAll('[data-seg-id]').forEach(btn => {
-                            btn.onclick = () => {
-                                item._cutSegments = item._cutSegments.filter(s => s.id !== btn.dataset.segId);
-                                renderSegList(itemId, item._cutSegments);
-                            };
-                        });
+                    });
+
+                    if (segCount > 0) {
+                        const summaryBox = createElement('div', {
+                            style: {
+                                background: 'rgba(76,175,80,0.1)',
+                                border: '1px solid rgba(76,175,80,0.3)',
+                                borderRadius: '6px',
+                                padding: '8px 12px',
+                                marginBottom: '10px',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center'
+                            }
+                        }, [
+                            createElement('span', { style: { color: '#4caf50', fontSize: '11px' } },
+                                `📋 已选 ${segCount} 段 | ${formatTimeHMS(totalDur)} `),
+                            createElement('span', { style: { color: '#888', fontSize: '10px' } },
+                                item._cutSegments.every(c => c.startIdx != null && c.endIdx != null)
+                                    ? `共${item._cutSegments.reduce((s, c) => s + (c.endIdx - c.startIdx + 1), 0)} 分片`
+                                    : '分片数待解析')
+                        ]);
+                        bodyWrap.appendChild(summaryBox);
                     }
 
-                    // 按钮行
-                    const btnRow = createElement('div', { style: { display: 'flex', gap: '6px' } });
-                    const copyBtn = createElement('button', { style: { flex: 1, padding: '6px', background: '#555', border: 'none', color: '#fff', borderRadius: '4px' } }, "复制链接");
-                    const dlBtn = createElement('button', { style: { flex: 1, padding: '6px', background: '#4caf50', border: 'none', borderRadius: '4px', fontWeight: 'bold' } }, "开始下载");
+                    const btnRow = createElement('div', {
+                        style: {
+                            display: 'flex',
+                            gap: '6px'
+                        }
+                    });
+
+                    const segBtn = createElement('button', {
+                        style: {
+                            flex: 1,
+                            padding: '8px',
+                            background: 'linear-gradient(135deg,#2196f3,#1976d2)',
+                            border: 'none',
+                            color: '#fff',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                            cursor: 'pointer',
+                            boxShadow: '0 2px 6px rgba(33,150,243,0.3)',
+                            transition: 'transform 0.1s'
+                        },
+                        onmouseover: (e) => { e.target.style.transform = 'translateY(-1px)'; },
+                        onmouseout: (e) => { e.target.style.transform = 'translateY(0)'; }
+                    }, segCount > 0 ? '🎬 继续选段' : '🎬 选段');
+
+                    const copyBtn = createElement('button', {
+                        style: {
+                            padding: '8px 12px',
+                            background: '#444',
+                            border: 'none',
+                            color: '#fff',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            cursor: 'pointer'
+                        }
+                    }, '复制');
+
+                    const dlBtn = createElement('button', {
+                        style: {
+                            flex: 1,
+                            padding: '8px',
+                            background: segCount > 0
+                                ? 'linear-gradient(135deg,#4caf50,#45a049)'
+                                : '#333',
+                            border: 'none',
+                            color: '#fff',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: segCount > 0 ? 'bold' : 'normal',
+                            cursor: segCount > 0 ? 'pointer' : 'not-allowed',
+                            boxShadow: segCount > 0 ? '0 2px 6px rgba(76,175,80,0.3)' : 'none',
+                            transition: 'transform 0.1s'
+                        },
+                        onmouseover: (e) => {
+                            if (segCount > 0) e.target.style.transform = 'translateY(-1px)';
+                        },
+                        onmouseout: (e) => { e.target.style.transform = 'translateY(0)'; }
+                    }, segCount > 0 ? `📥 下载(${segCount}段)` : '📥 下载');
+
+                    segBtn.onclick = async () => {
+                        try {
+                            if (!item._parsedM3u8) {
+                                segBtn.textContent = '解析中...';
+                                item._parsedM3u8 = await parseM3u8(item.url);
+                            }
+                            const res = await openPreviewSelectSegment(item.url, item._cutSegments);
+                            if (res && res.segments) {
+                                item._cutSegments = res.segments.map(s => {
+                                    const mapped = timeToSegmentIndex(item._parsedM3u8.timeList, s.startSec, s.endSec);
+                                    return {
+                                        ...s,
+                                        startIdx: mapped.startIdx,
+                                        endIdx: mapped.endIdx
+                                    };
+                                });
+                                this.render();
+                            }
+                        } catch (e) {
+                            alert("选段失败: " + e.message);
+                        }
+                    };
 
                     copyBtn.onclick = async () => {
                         await copyToClipboard(item.url);
@@ -1118,7 +1429,7 @@
 
                     dlBtn.onclick = async () => {
                         if (!item._cutSegments || item._cutSegments.length === 0) {
-                            alert('请先添加时间段');
+                            alert('请先点击"🎬 选段"添加时间段');
                             return;
                         }
                         const opt = {
@@ -1126,11 +1437,65 @@
                         };
                         await window.TaskRunner(item.url, 'm3u8', dlBtn, opt);
                     };
+
+                    btnRow.appendChild(segBtn);
                     btnRow.appendChild(copyBtn);
                     btnRow.appendChild(dlBtn);
                     bodyWrap.appendChild(btnRow);
+
+                    if (segCount > 0) {
+                        const segListBox = createElement('div', {
+                            style: {
+                                marginTop: '10px',
+                                background: '#111',
+                                borderRadius: '6px',
+                                padding: '8px',
+                                maxHeight: '100px',
+                                overflowY: 'auto'
+                            }
+                        });
+
+                        item._cutSegments.forEach((seg, i) => {
+                            const segRow = createElement('div', {
+                                style: {
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    padding: '4px 6px',
+                                    fontSize: '11px',
+                                    borderBottom: i < item._cutSegments.length - 1 ? '1px solid #222' : 'none'
+                                }
+                            }, [
+                                createElement('span', { style: { color: '#4caf50', fontWeight: 'bold', minWidth: '20px' } }, `${i + 1}.`),
+                                createElement('span', { style: { flex: 1 } },
+                                    `${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)} `),
+                                createElement('span', { style: { color: '#888', fontSize: '10px' } },
+                                    `${seg.duration.toFixed(1)} s`),
+                                createElement('button', {
+                                    style: {
+                                        background: 'none',
+                                        border: 'none',
+                                        color: '#f44336',
+                                        cursor: 'pointer',
+                                        fontSize: '14px',
+                                        padding: '0 4px',
+                                        lineHeight: 1
+                                    }
+                                }, '✕')
+                            ]);
+                            segRow.children[3].onclick = () => {
+                                item._cutSegments.splice(i, 1);
+                                this.render();
+                            };
+                            segListBox.appendChild(segRow);
+                        });
+
+                        bodyWrap.appendChild(segListBox);
+                    }
+
                     itemWrap.appendChild(bodyWrap);
                 }
+
                 this.listEl.appendChild(itemWrap);
             });
         }
