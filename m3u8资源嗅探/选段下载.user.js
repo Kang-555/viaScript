@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      5.4
 // @description  修复嗅探失效，简化面板；网页m3u8嗅探、可视化拖拽选段预览、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
