@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8嗅探下载器
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      4.0
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -482,14 +482,17 @@
         const taskStartTs = Date.now();
         let lastSpeedReport = 0;
         let movingSpeed = 0;
+        // 按视频时长计算进度（分片时长可能不一致）
+        const totalDuration = workSegments.reduce((sum, s) => sum + (s.dur || 0), 0);
+        let completedDuration = 0;
 
         const updateProgress = (force = false) => {
             const now = Date.now();
             if (!force && now - lastProgressUpdate < 150) return;
             lastProgressUpdate = now;
             const elapsed = (now - taskStartTs) / 1000;
-            const overallPercent = (completedCount / workSegments.length) * 100;
-            const segProgress = workSegments.length > 0 ? completedCount / workSegments.length : 0;
+            const overallPercent = totalDuration > 0 ? (completedDuration / totalDuration) * 100 : (completedCount / workSegments.length) * 100;
+            const segProgress = totalDuration > 0 ? completedDuration / totalDuration : (workSegments.length > 0 ? completedCount / workSegments.length : 0);
             const etaSec = elapsed > 0 && segProgress > 0 && segProgress < 1
                 ? (elapsed / segProgress) * (1 - segProgress)
                 : 0;
@@ -497,7 +500,7 @@
             const completedInfo = `${completedCount}/${workSegments.length}`;
             const failInfo = failCount > 0 ? ` [失败${failCount}]` : '';
             const text = `${overallPercent.toFixed(0)}% | ${completedInfo} 分片 | ${Utils.formatBytes(totalBytes)} | ${speedStr} | ETA ${Utils.formatTime(etaSec)}${failInfo}`;
-            onProgress(overallPercent, text, { completedCount, total: workSegments.length, totalBytes, speed: movingSpeed });
+            onProgress(overallPercent, text, { completedCount, total: workSegments.length, totalBytes, speed: movingSpeed, completedDuration, totalDuration });
         };
 
         const worker = async () => {
@@ -548,6 +551,7 @@
                 }
 
                 completedCount++;
+                completedDuration += workSegments[index].dur || 0;
 
                 const now = Date.now();
                 if (now - lastSpeedReport >= 500) {
@@ -1386,26 +1390,38 @@
                 keyCache.set(kurl, new Uint8Array(keyData));
             }
 
-            const totalSegsAll = cutSegments.reduce((sum, seg) => sum + (seg.endIdx - seg.startIdx + 1), 0);
-            let accumulatedSegs = 0;
+            // 计算总时长（用于进度）
+            const totalDurationAll = cutSegments.reduce((sum, seg) => {
+                for (let i = seg.startIdx; i <= seg.endIdx; i++) {
+                    sum += segments[i]?.dur || 0;
+                }
+                return sum;
+            }, 0);
+            let accumulatedDuration = 0;
 
             for (const segItem of cutSegments) {
                 if (this.cancelled) throw new Error('已取消');
+
+                // 当前段的时长
+                const segDuration = segments.slice(segItem.startIdx, segItem.endIdx + 1)
+                    .reduce((s, seg) => s + (seg.dur || 0), 0);
 
                 await downloadM3u8BySegments(
                     segments,
                     keyCache,
                     (pctSeg, textSeg, infoSeg) => {
-                        const doneInSeg = infoSeg?.completedCount ?? 0;
-                        const overallPct = ((accumulatedSegs + doneInSeg) / totalSegsAll) * 100;
-                        onProgress(overallPct, textSeg, { ...infoSeg, totalSegsAll });
+                        const doneDuration = infoSeg?.completedDuration ?? 0;
+                        const overallPct = totalDurationAll > 0
+                            ? ((accumulatedDuration + doneDuration) / totalDurationAll) * 100
+                            : 0;
+                        onProgress(overallPct, textSeg, { ...infoSeg, totalDurationAll });
                     },
                     writer,
                     segItem.startIdx,
                     segItem.endIdx,
                     true
                 );
-                accumulatedSegs += (segItem.endIdx - segItem.startIdx + 1);
+                accumulatedDuration += segDuration;
             }
 
             await writer.close(filename);
