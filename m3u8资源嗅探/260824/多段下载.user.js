@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         多段下载器
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.5
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -358,8 +358,12 @@
          * 从Uint8Array读取33位PCR值
          */
         readPCR(buf, offset) {
-            const pcrBase = (buf[offset] << 25) | (buf[offset + 1] << 17) | (buf[offset + 2] << 9) | (buf[offset + 3] << 1) | (buf[offset + 4] >> 7);
-            const pcrExt = ((buf[offset + 4] >> 1) & 0x01) | ((buf[offset + 5] & 0x01) << 8);
+            const pcrBase = buf[offset] * 0x02000000
+                + (buf[offset + 1] << 17)
+                + (buf[offset + 2] << 9)
+                + (buf[offset + 3] << 1)
+                + (buf[offset + 4] >> 7);
+            const pcrExt = ((buf[offset + 4] & 0x1F) << 4) | ((buf[offset + 5] >> 3) & 0x0F);
             return pcrBase * 300 + pcrExt;
         },
 
@@ -369,12 +373,14 @@
         writePCR(buf, offset, pcrValue) {
             const pcrBase = Math.floor(pcrValue / 300);
             const pcrExt = pcrValue % 300;
-            buf[offset] = (pcrBase >> 25) & 0xFF;
-            buf[offset + 1] = (pcrBase >> 17) & 0xFF;
-            buf[offset + 2] = (pcrBase >> 9) & 0xFF;
-            buf[offset + 3] = (pcrBase >> 1) & 0xFF;
-            buf[offset + 4] = ((pcrBase & 0x01) << 7) | ((pcrExt >> 8) & 0x01) | 0x10;
-            buf[offset + 5] = pcrExt & 0xFF;
+            const highByte = Math.floor(pcrBase / 0x02000000);
+            const remainder = pcrBase - highByte * 0x02000000;
+            buf[offset] = highByte & 0xFF;
+            buf[offset + 1] = (remainder >> 17) & 0xFF;
+            buf[offset + 2] = (remainder >> 9) & 0xFF;
+            buf[offset + 3] = (remainder >> 1) & 0xFF;
+            buf[offset + 4] = ((remainder & 0x01) << 7) | (pcrExt >> 4) | 0x60;
+            buf[offset + 5] = (pcrExt & 0x0F) << 3 | 0x07;
         },
 
         /**
@@ -386,25 +392,25 @@
             const b2 = buf[offset + 2];
             const b3 = buf[offset + 3];
             const b4 = buf[offset + 4];
-            let pts = 0;
-            pts |= ((b0 & 0x0E) << 29);
-            pts |= (b1 << 22);
-            pts |= ((b2 & 0xFE) << 14);
-            pts |= (b3 << 7);
-            pts |= (b4 >> 1);
-            return pts >>> 0;
+            const pts = (b0 & 0x0E) * 0x20000000
+                + (b1 << 22)
+                + ((b2 & 0xFE) << 13)
+                + (b3 << 6)
+                + (b4 >> 1);
+            return pts;
         },
 
         /**
          * 写入33位PTS/DTS值
          */
         writePTS(buf, offset, ptsValue) {
-            const v = ptsValue >>> 0;
-            buf[offset] = (buf[offset] & 0xF0) | ((v >> 29) & 0x0E);
-            buf[offset + 1] = (v >> 22) & 0xFF;
-            buf[offset + 2] = ((v >> 14) & 0xFE) | 0x01;
-            buf[offset + 3] = (v >> 7) & 0xFF;
-            buf[offset + 4] = ((v << 1) & 0xFE) | 0x01;
+            const highBits = Math.floor(ptsValue / 0x20000000) & 0x07;
+            const remainder = ptsValue - highBits * 0x20000000;
+            buf[offset] = (buf[offset] & 0xF0) | (highBits << 1);
+            buf[offset + 1] = (remainder >> 22) & 0xFF;
+            buf[offset + 2] = ((remainder >> 14) & 0xFE) | 0x01;
+            buf[offset + 3] = (remainder >> 7) & 0xFF;
+            buf[offset + 4] = ((remainder << 1) & 0xFE) | 0x01;
         },
 
         /**
@@ -464,7 +470,7 @@
                         if (pcrFlag) {
                             const pcrOffset = adaptationOffset + 2;
                             const pcr = this.readPCR(result, pcrOffset);
-                            this.writePCR(result, pcrOffset, (pcr + offset) >>> 0);
+                            this.writePCR(result, pcrOffset, pcr + offset);
                         }
                     }
                 }
@@ -486,13 +492,13 @@
 
                             if ((ptsDtsFlag & 0x02) && ptsOffset + 5 <= len) {
                                 const pts = this.readPTS(result, ptsOffset + 1);
-                                this.writePTS(result, ptsOffset + 1, (pts + offset) >>> 0);
+                                this.writePTS(result, ptsOffset + 1, pts + offset);
                             }
 
                             if (ptsDtsFlag === 0x03 && ptsOffset + 10 <= len) {
                                 const dtsOffset = ptsOffset + 5;
                                 const dts = this.readPTS(result, dtsOffset);
-                                this.writePTS(result, dtsOffset, (dts + offset) >>> 0);
+                                this.writePTS(result, dtsOffset, dts + offset);
                             }
                         }
                     }

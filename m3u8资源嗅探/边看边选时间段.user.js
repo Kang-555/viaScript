@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         m3u8可视化拖拽选段下载【重构修复嗅探版】
+// @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      3.1‑fix‑sniff
-// @description  修复嗅探失效，简化面板；网页m3u8嗅探、可视化拖拽选段预览、AES‑128解密、分片拼接TS、手机电脑通用
+// @version      5.0
+// @description  修复嗅探失效，简化面板；网页m3u8嗅探、可视化拖拽选段预览、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
 // @match        *://*/*
@@ -52,13 +52,6 @@
 
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    function toSeconds(s) {
-        const parts = String(s).split(':').map(Number);
-        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-        if (parts.length === 2) return parts[0] * 60 + parts[1];
-        return Number(s) || 0;
     }
 
     function resolveUrl(baseUrl, relativeUrl) {
@@ -175,7 +168,7 @@
     }
 
     // ==========================================
-    // AES‑128解密
+    // AES-128解密
     // ==========================================
     const AESCrypto = {
         hexToBytes: (hex) => {
@@ -195,7 +188,7 @@
         },
         decrypt: async (data, key, iv) => {
             try {
-                const algorithm = { name: 'AES‑CBC', iv: iv };
+                const algorithm = { name: 'AES-CBC', iv: iv };
                 const cryptoKey = await window.crypto.subtle.importKey('raw', key, algorithm, false, ['decrypt']);
                 return new Uint8Array(await window.crypto.subtle.decrypt(algorithm, cryptoKey, data));
             } catch (error) {
@@ -263,7 +256,7 @@
                 if (regex.test(url) || regex.test(typeStr)) {
                     this.seenUrls.add(cleanKey);
                     console.log(`[嗅探]发现 ${type}:`, url);
-                    Bus.emit('video‑found', { url, type });
+                    Bus.emit('video-found', { url, type });
                     return;
                 }
             }
@@ -276,11 +269,11 @@
             win.fetch = async (...args) => {
                 const req = args[0] instanceof Request ? args[0] : new Request(args[0]);
                 const url = req.url;
-                let contentType = req.headers.get('content‑type') || '';
+                let contentType = req.headers.get('content-type') || '';
                 const resp = await originalFetch.apply(win, args);
                 // 优先读取响应头，捕获m3u8
                 try {
-                    const ctype = resp.headers.get('content‑type');
+                    const ctype = resp.headers.get('content-type');
                     if (ctype) contentType = ctype;
                 } catch (e) { }
                 this.detect(resp.url || url, contentType);
@@ -303,11 +296,11 @@
                         if (this.readyState === 4) {
                             try {
                                 const finalUrl = this.responseURL || this._reqUrl;
-                                const ctype = this.getResponseHeader('content‑type');
+                                const ctype = this.getResponseHeader('content-type');
                                 self.detect(finalUrl, ctype);
                                 // 额外：部分接口直接返回m3u8文本
                                 if (typeof this.responseText === 'string' && this.responseText.includes('#EXTM3U')) {
-                                    self.detect(finalUrl, 'application/x‑mpegurl');
+                                    self.detect(finalUrl, 'application/x-mpegurl');
                                 }
                             } catch (e) { }
                         }
@@ -335,20 +328,26 @@
         PCR_TIMEBASE: 90000,
 
         readPCR(buf, offset) {
-            const pcrBase = (buf[offset] << 25) | (buf[offset + 1] << 17) | (buf[offset + 2] << 9) | (buf[offset + 3] << 1) | (buf[offset + 4] >> 7);
-            const pcrExt = ((buf[offset + 4] >> 1) & 0x01) | ((buf[offset + 5] & 0x01) << 8);
+            const pcrBase = buf[offset] * 0x02000000
+                + (buf[offset + 1] << 17)
+                + (buf[offset + 2] << 9)
+                + (buf[offset + 3] << 1)
+                + (buf[offset + 4] >> 7);
+            const pcrExt = ((buf[offset + 4] & 0x1F) << 4) | ((buf[offset + 5] >> 3) & 0x0F);
             return pcrBase * 300 + pcrExt;
         },
 
         writePCR(buf, offset, pcrValue) {
-            const pcrBase = Math.floor(pcrValue / 300);
+            let pcrBase = Math.floor(pcrValue / 300);
             const pcrExt = pcrValue % 300;
-            buf[offset] = (pcrBase >> 25) & 0xFF;
-            buf[offset + 1] = (pcrBase >> 17) & 0xFF;
-            buf[offset + 2] = (pcrBase >> 9) & 0xFF;
-            buf[offset + 3] = (pcrBase >> 1) & 0xFF;
-            buf[offset + 4] = ((pcrBase & 0x01) << 7) | ((pcrExt >> 8) & 0x01) | 0x10;
-            buf[offset + 5] = pcrExt & 0xFF;
+            const highByte = Math.floor(pcrBase / 0x02000000);
+            const remainder = pcrBase - highByte * 0x02000000;
+            buf[offset] = highByte & 0xFF;
+            buf[offset + 1] = (remainder >> 17) & 0xFF;
+            buf[offset + 2] = (remainder >> 9) & 0xFF;
+            buf[offset + 3] = (remainder >> 1) & 0xFF;
+            buf[offset + 4] = ((remainder & 0x01) << 7) | (pcrExt >> 4) | 0x60;
+            buf[offset + 5] = (pcrExt & 0x0F) << 3 | 0x07;
         },
 
         readPTS(buf, offset) {
@@ -357,22 +356,22 @@
             const b2 = buf[offset + 2];
             const b3 = buf[offset + 3];
             const b4 = buf[offset + 4];
-            let pts = 0;
-            pts |= ((b0 & 0x0E) << 29);
-            pts |= (b1 << 22);
-            pts |= ((b2 & 0xFE) << 14);
-            pts |= (b3 << 7);
-            pts |= (b4 >> 1);
-            return pts >>> 0;
+            const pts = (b0 & 0x0E) * 0x20000000
+                + (b1 << 22)
+                + ((b2 & 0xFE) << 13)
+                + (b3 << 6)
+                + (b4 >> 1);
+            return pts;
         },
 
         writePTS(buf, offset, ptsValue) {
-            const v = ptsValue >>> 0;
-            buf[offset] = (buf[offset] & 0xF0) | ((v >> 29) & 0x0E);
-            buf[offset + 1] = (v >> 22) & 0xFF;
-            buf[offset + 2] = ((v >> 14) & 0xFE) | 0x01;
-            buf[offset + 3] = (v >> 7) & 0xFF;
-            buf[offset + 4] = ((v << 1) & 0xFE) | 0x01;
+            const highBits = Math.floor(ptsValue / 0x20000000) & 0x07;
+            const remainder = ptsValue - highBits * 0x20000000;
+            buf[offset] = (buf[offset] & 0xF0) | (highBits << 1);
+            buf[offset + 1] = (remainder >> 22) & 0xFF;
+            buf[offset + 2] = ((remainder >> 14) & 0xFE) | 0x01;
+            buf[offset + 3] = (remainder >> 7) & 0xFF;
+            buf[offset + 4] = ((remainder << 1) & 0xFE) | 0x01;
         },
 
         getPCRRanges(data) {
@@ -412,7 +411,7 @@
                         if (pcrFlag) {
                             const pcrOffset = adaptationOffset + 2;
                             const pcr = this.readPCR(result, pcrOffset);
-                            this.writePCR(result, pcrOffset, (pcr + offset) >>> 0);
+                            this.writePCR(result, pcrOffset, pcr + offset);
                         }
                     }
                 }
@@ -430,12 +429,12 @@
                             const ptsOffset = payloadOffset + 3;
                             if ((ptsDtsFlag & 0x02) && ptsOffset + 5 <= len) {
                                 const pts = this.readPTS(result, ptsOffset + 1);
-                                this.writePTS(result, ptsOffset + 1, (pts + offset) >>> 0);
+                                this.writePTS(result, ptsOffset + 1, pts + offset);
                             }
                             if (ptsDtsFlag === 0x03 && ptsOffset + 10 <= len) {
                                 const dtsOffset = ptsOffset + 5;
                                 const dts = this.readPTS(result, dtsOffset);
-                                this.writePTS(result, dtsOffset, (dts + offset) >>> 0);
+                                this.writePTS(result, dtsOffset, dts + offset);
                             }
                         }
                     }
@@ -447,33 +446,43 @@
         fixTimestamps(buffers) {
             if (buffers.length === 0) return new Uint8Array(0);
             if (buffers.length === 1) return buffers[0];
-            let cumulativeOffset = 0;
-            let lastEndPCR = null;
+
             const fixedBuffers = [];
+            let baseTime = null;
+            let totalOffset = 0;
+
             for (let i = 0; i < buffers.length; i++) {
                 const buf = buffers[i];
                 const { firstPCR, lastPCR } = this.getPCRRanges(buf);
-                if (lastEndPCR !== null && firstPCR !== null) {
-                    const gap = lastEndPCR - firstPCR;
-                    if (gap !== 0) {
-                        cumulativeOffset += gap;
-                        console.log(`[TSPacketFixer] 分片${i} 时间戳偏移: +${(gap / this.PCR_TIMEBASE).toFixed(2)}s (累计: ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s)`);
-                    }
+
+                if (firstPCR === null) {
+                    fixedBuffers.push(buf);
+                    continue;
                 }
-                const fixedBuf = this.applyTimestampOffset(buf, cumulativeOffset);
-                fixedBuffers.push(fixedBuf);
-                if (lastPCR !== null) {
-                    lastEndPCR = lastPCR + cumulativeOffset;
+
+                if (baseTime === null) {
+                    totalOffset = -firstPCR;
+                    const fixedBuf = this.applyTimestampOffset(buf, totalOffset);
+                    fixedBuffers.push(fixedBuf);
+                    baseTime = lastPCR + totalOffset;
+                } else {
+                    const offset = baseTime - firstPCR;
+                    totalOffset += offset;
+                    const fixedBuf = this.applyTimestampOffset(buf, offset);
+                    fixedBuffers.push(fixedBuf);
+                    baseTime = lastPCR + offset;
                 }
             }
+
             const totalSize = fixedBuffers.reduce((sum, b) => sum + b.length, 0);
             const result = new Uint8Array(totalSize);
-            let offset = 0;
+            let pos = 0;
             for (const fb of fixedBuffers) {
-                result.set(fb, offset);
-                offset += fb.length;
+                result.set(fb, pos);
+                pos += fb.length;
             }
-            console.log(`[TSPacketFixer] 时间戳修复完成: ${buffers.length}个分片, 总时长偏移 ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s`);
+
+            console.log(`[TSPacketFixer] 时间戳修复完成: ${fixedBuffers.length}个分片, 总偏移${(totalOffset / this.PCR_TIMEBASE).toFixed(2)}s`);
             return result;
         }
     };
@@ -508,12 +517,12 @@
     async function parseM3u8(url) {
         let content = await gmRequest(url);
         // 处理多级m3u8
-        if (content.includes('#EXT‑X‑STREAM‑INF')) {
+        if (content.includes('#EXT-X-STREAM-INF')) {
             const lines = content.split('\n');
             let bestBandwidth = 0;
             let bestUrl = null;
             for (let i = 0; i < lines.length; i++) {
-                if (lines[i].startsWith('#EXT‑X‑STREAM‑INF')) {
+                if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
                     const bw = parseInt((lines[i].match(/BANDWIDTH=(\d+)/) || [0, 0])[1]);
                     const nextLine = lines[i + 1]?.trim();
                     if (nextLine && !nextLine.startsWith('#') && bw > bestBandwidth) {
@@ -538,15 +547,15 @@
         for (const line of lines) {
             const l = line.trim();
             if (!l) continue;
-            if (l.startsWith('#EXT‑X‑KEY')) {
+            if (l.startsWith('#EXT-X-KEY')) {
                 const method = (l.match(/METHOD=([^,]+)/) || [])[1];
                 const uri = (l.match(/URI="([^"]+)"/) || [])[1];
-                const ivHex = (l.match(/IV=(0x[\da‑f]+)/i) || [])[1];
-                if (method === 'AES‑128' && uri) {
+                const ivHex = (l.match(/IV=(0x[\da-f]+)/i) || [])[1];
+                if (method === 'AES-128' && uri) {
                     currentKey = resolveUrl(url, uri);
                     currentIV = ivHex ? AESCrypto.hexToBytes(ivHex) : null;
                 }
-            } else if (l.startsWith('#EXT‑X‑MEDIA‑SEQUENCE')) {
+            } else if (l.startsWith('#EXT-X-MEDIA-SEQUENCE')) {
                 sequence = parseInt(l.split(':')[1]);
             } else if (l.startsWith('#EXTINF:')) {
                 currentInf = parseFloat(l.match(/#EXTINF:([\d.]+)/)[1]);
@@ -703,18 +712,9 @@
                         }
                     }
                     segmentIndices.sort((a, b) => a - b);
-                    console.log('[TaskRunner] 多段模式，选中分片数:', segmentIndices.length);
-                } else if (opt.beginSec !== undefined && opt.endSec !== undefined) {
-                    const mapped = timeToSegmentIndex(parseRet.timeList, opt.beginSec, opt.endSec);
-                    segmentIndices = [];
-                    for (let i = mapped.startIdx; i <= mapped.endIdx; i++) segmentIndices.push(i);
-                    console.log('[TaskRunner] 单段时间换算分片:', mapped.startIdx, '-', mapped.endIdx);
-                } else if (opt.startIdx !== undefined && opt.endIdx !== undefined) {
-                    segmentIndices = [];
-                    for (let i = opt.startIdx; i <= opt.endIdx; i++) segmentIndices.push(i);
-                    console.log('[TaskRunner] 分片索引:', opt.startIdx, '-', opt.endIdx);
+                    console.log('[TaskRunner] 选段模式，选中分片数:', segmentIndices.length);
                 } else {
-                    console.log('[TaskRunner] 未指定分片/时间范围，将下载全部分片');
+                    console.log('[TaskRunner] 未指定分片范围，将下载全部分片');
                 }
                 // 加载密钥
                 const keyCache = new Map();
@@ -763,7 +763,14 @@
         const closeBtn = createElement('button', {
             style: { position: 'fixed', top: 10, right: 10, zIndex: 100, padding: '4px 10px' }
         }, "关闭");
-        const video = createElement('video', { controls: true, autoplay: true, playsinline: true, style: { width: '100%' } });
+
+        const videoWrap = createElement('div', { style: { position: 'relative', width: '100%', background: '#000' } });
+        const video = createElement('video', {
+            controls: true, autoplay: true, playsinline: true,
+            style: { width: '100%', maxHeight: '50vh', display: 'block', background: '#000' }
+        });
+        videoWrap.appendChild(video);
+
         const editorWrap = createElement('div', { style: { background: '#1a1a1a', color: '#fff', padding: '14px' } });
 
         let hlsInst = null;
@@ -776,57 +783,76 @@
         }
 
         let startSec = 0;
-        let endSec = Math.min(60, totalDuration);
+        let endSec = Math.min(60, totalDuration || 1);
+        const safeTotal = totalDuration || 1;
 
-        const t1Text = createElement('div', {}, `起始：${formatTimeHMS(startSec)}`);
-        const t2Text = createElement('div', {}, `结束：${formatTimeHMS(endSec)}`);
+        const t1Text = createElement('div', { style: { fontSize: '13px', marginBottom: '4px' } }, `起始：${formatTimeHMS(startSec)}`);
+        const t2Text = createElement('div', { style: { fontSize: '13px', marginBottom: '4px' } }, `结束：${formatTimeHMS(endSec)}`);
+        const durText = createElement('div', { style: { fontSize: '11px', color: '#888', marginBottom: '10px' } },
+            `总时长：${formatTimeHMS(totalDuration)} | 已选：${formatTimeHMS(endSec - startSec)} | ${parseRet.segments.length}分片`);
 
-        // 简单拖拽轨道
-        function buildSlider(labelText, isStart, onChange) {
-            const wrap = createElement('div', { style: { margin: '8px 0' } });
-            const track = createElement('div', { style: { width: '100%', height: '8px', background: '#333', borderRadius: '4px', position: 'relative' } });
-            const fill = createElement('div', { style: { position: 'absolute', height: '100%', background: '#4caf50', borderRadius: '4px', width: '0%' } });
-            const thumb = createElement('div', { style: { width: '16px', height: '16px', borderRadius: '50%', background: '#4caf50', position: 'absolute', top: '-4px', marginLeft: '-8px', cursor: 'grab' } });
+        function buildSlider(labelText, initialPct, onChange) {
+            initialPct = Math.max(0, Math.min(1, initialPct));
+            const wrap = createElement('div', { style: { margin: '10px 0' } });
+            const label = createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px', color: '#aaa' } }, [
+                createElement('span', {}, labelText),
+                createElement('span', {}, `${formatTimeHMS(initialPct * safeTotal)}`)
+            ]);
+            const track = createElement('div', { style: { width: '100%', height: '8px', background: '#333', borderRadius: '4px', position: 'relative', cursor: 'pointer' } });
+            const fill = createElement('div', { style: { position: 'absolute', height: '100%', background: '#4caf50', borderRadius: '4px', width: `${initialPct * 100}%` } });
+            const thumb = createElement('div', { style: { width: '16px', height: '16px', borderRadius: '50%', background: '#4caf50', position: 'absolute', top: '-4px', marginLeft: '-8px', cursor: 'grab', left: `${initialPct * 100}%`, boxShadow: '0 0 4px #000' } });
             track.appendChild(fill);
             track.appendChild(thumb);
-            wrap.appendChild(createElement('div', {}, labelText));
+            wrap.appendChild(label);
             wrap.appendChild(track);
 
             let dragging = false;
-            function setPos(clientX) {
-                const rect = track.getBoundingClientRect();
-                let pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-                const sec = pct * totalDuration;
+            function setPos(pct) {
+                pct = Math.max(0, Math.min(1, pct));
+                const sec = pct * safeTotal;
                 thumb.style.left = `${pct * 100}%`;
                 fill.style.width = `${pct * 100}%`;
+                label.children[1].textContent = formatTimeHMS(sec);
                 onChange(sec);
             }
-            thumb.addEventListener('mousedown', () => dragging = true);
+            function clientXToPct(clientX) {
+                const rect = track.getBoundingClientRect();
+                if (rect.width === 0) return 0;
+                return (clientX - rect.left) / rect.width;
+            }
+            thumb.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); });
             thumb.addEventListener('touchstart', (e) => { dragging = true; }, { passive: true });
-            document.addEventListener('mousemove', (e) => { if (dragging) setPos(e.clientX); });
+            track.addEventListener('mousedown', (e) => {
+                if (e.target === thumb) return;
+                setPos(clientXToPct(e.clientX));
+            });
+            document.addEventListener('mousemove', (e) => { if (dragging) setPos(clientXToPct(e.clientX)); });
             document.addEventListener('touchmove', (e) => {
-                if (dragging) setPos(e.touches[0].clientX);
+                if (dragging) setPos(clientXToPct(e.touches[0].clientX));
             }, { passive: true });
             document.addEventListener('mouseup', () => dragging = false);
             document.addEventListener('touchend', () => dragging = false);
             return { wrap, setPos };
         }
 
-        const sliderStart = buildSlider("起始时间", true, (sec) => {
+        const sliderStart = buildSlider("起始时间", startSec / safeTotal, (sec) => {
             startSec = Math.min(sec, endSec);
             video.currentTime = startSec;
             t1Text.textContent = `起始：${formatTimeHMS(startSec)}`;
+            durText.children[1].textContent = `已选：${formatTimeHMS(endSec - startSec)}`;
         });
-        const sliderEnd = buildSlider("结束时间", false, (sec) => {
+        const sliderEnd = buildSlider("结束时间", endSec / safeTotal, (sec) => {
             endSec = Math.max(sec, startSec);
             video.currentTime = endSec;
             t2Text.textContent = `结束：${formatTimeHMS(endSec)}`;
+            durText.children[1].textContent = `已选：${formatTimeHMS(endSec - startSec)}`;
         });
 
         const confirmBtn = createElement('button', {
-            style: { marginTop: '10px', padding: '8px 14px', background: '#4caf50', border: 'none', borderRadius: '4px', fontWeight: 'bold' }
+            style: { marginTop: '10px', padding: '8px 14px', background: '#4caf50', border: 'none', borderRadius: '4px', fontWeight: 'bold', width: '100%', fontSize: '14px' }
         }, "✅确定回填时间");
 
+        editorWrap.appendChild(durText);
         editorWrap.appendChild(t1Text);
         editorWrap.appendChild(sliderStart.wrap);
         editorWrap.appendChild(t2Text);
@@ -834,7 +860,7 @@
         editorWrap.appendChild(confirmBtn);
 
         overlay.appendChild(closeBtn);
-        overlay.appendChild(video);
+        overlay.appendChild(videoWrap);
         overlay.appendChild(editorWrap);
         document.body.appendChild(overlay);
 
@@ -862,16 +888,15 @@
     class SimpleUI {
         constructor() {
             this.resources = [];
-            this.openIndex = -1;
+            this.openId = null;
             this.panel = null;
             this.toggleBtn = null;
             this.listEl = null;
-            Bus.on('video‑found', (d) => this.addResource(d));
+            Bus.on('video-found', (d) => this.addResource(d));
         }
 
         async init() {
-            if (document.querySelector('#m3u8‑sniffer‑panel')) return;
-            // 等待body
+            if (document.querySelector('#m3u8-sniffer-panel')) return;
             await new Promise(res => {
                 if (document.body) return res();
                 const ob = new MutationObserver(() => {
@@ -880,37 +905,41 @@
                 ob.observe(document.documentElement, { childList: true, subtree: true });
             });
 
-            // 悬浮开关按钮
             this.toggleBtn = createElement('button', {
-                id: 'm3u8‑sniffer‑toggle',
+                id: 'm3u8-sniffer-toggle',
                 style: {
-                    position: 'fixed', bottom: '16px', left: '16px', width: '42px', height: '42px',
+                    position: 'fixed', bottom: '16px', left: '16px', width: '44px', height: '44px',
                     borderRadius: '50%', background: '#4caf50', border: 'none', zIndex: '999990',
-                    fontWeight: 'bold', fontSize: '16px', boxShadow: '0 2px 8px #0004'
+                    fontWeight: 'bold', fontSize: '16px', boxShadow: '0 2px 10px #0006',
+                    color: '#fff', cursor: 'pointer', transition: 'transform 0.15s'
                 }
-            }, "S");
+            }, "🎬");
 
-            // 主面板
             this.panel = createElement('div', {
-                id: 'm3u8‑sniffer‑panel',
+                id: 'm3u8-sniffer-panel',
                 style: {
-                    position: 'fixed', bottom: '64px', left: '16px', width: 'min(320px, calc(100vw‑32px))',
-                    background: 'rgba(0,0,0,0.85)', color: '#fff', borderRadius: '8px',
+                    position: 'fixed', bottom: '68px', left: '16px', width: 'min(360px, calc(100vw-32px))',
+                    background: 'rgba(0,0,0,0.88)', color: '#fff', borderRadius: '10px',
                     border: '1px solid #4caf50', zIndex: '999990', display: 'none', fontSize: '12px',
-                    maxHeight: '70vh', overflow: 'hidden', backdropFilter: 'blur(4px)'
+                    maxHeight: '75vh', overflow: 'hidden', backdropFilter: 'blur(6px)',
+                    boxShadow: '0 4px 20px #0008'
                 }
             });
+            this.countEl = createElement('span', { style: { fontSize: '11px', opacity: '0.8' } }, "0 个资源");
             const head = createElement('div', {
-                style: { padding: '8px 10px', background: '#222', fontWeight: 'bold', color: '#4caf50' }
-            }, "视频嗅探下载器");
-            this.listEl = createElement('div', { style: { overflowY: 'auto', maxHeight: '400px' } });
+                style: { padding: '10px 12px', background: 'linear-gradient(90deg,#1b5e20,#2e7d32)', fontWeight: 'bold', color: '#fff', borderRadius: '10px 10px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }
+            }, [
+                createElement('span', {}, "🎬 视频嗅探下载器"),
+                this.countEl
+            ]);
+            this.listEl = createElement('div', { style: { overflowY: 'auto', maxHeight: '420px' } });
             this.panel.appendChild(head);
             this.panel.appendChild(this.listEl);
 
             this.toggleBtn.onclick = () => {
                 const hidden = this.panel.style.display === 'none';
                 this.panel.style.display = hidden ? 'block' : 'none';
-                this.toggleBtn.textContent = hidden ? "S" : "X";
+                this.toggleBtn.textContent = hidden ? "🎬" : "×";
             };
 
             document.body.appendChild(this.toggleBtn);
@@ -922,72 +951,47 @@
             const t = type === 'm3u8' ? 'm3u8' : 'mp4';
             const exist = this.resources.some(r => r.url === url);
             if (exist) return;
-            this.resources.unshift({ url, type: t });
+            const id = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+            this.resources.unshift({ id, url, type: t });
             this.render();
         }
 
         render() {
             this.listEl.innerHTML = '';
+            this.countEl.textContent = `${this.resources.length} 个资源`;
             if (this.resources.length === 0) {
-                this.listEl.innerHTML = `<div style="padding:16px;text‑align:center;color:#888">等待捕获视频资源...</div>`;
+                this.listEl.innerHTML = `<div style="padding:20px;text-align:center;color:#888">等待捕获视频资源...<br><span style="font-size:11px">播放视频时自动嗅探</span></div>`;
                 return;
             }
             this.resources.forEach((item, idx) => {
-                item.id = item.id || ('r_' + idx + '_' + Math.random().toString(36).slice(2));
-                const isOpen = this.openIndex === idx;
+                const isOpen = this.openId === item.id;
                 const itemWrap = createElement('div', { style: { borderBottom: '1px solid #333' } });
                 const titleRow = createElement('div', {
-                    style: { padding: '8px 10px', cursor: 'pointer', display: 'flex', gap: '6px', alignItems: 'center' },
-                    onclick: () => { this.openIndex = isOpen ? -1 : idx; this.render(); }
+                    style: { padding: '8px 10px', cursor: 'pointer', display: 'flex', gap: '6px', alignItems: 'center', background: isOpen ? '#1a1a1a' : 'transparent', transition: 'background 0.15s' },
+                    onclick: () => { this.openId = isOpen ? null : item.id; this.render(); }
                 });
                 const tag = createElement('span', {
                     style: {
                         background: item.type === 'm3u8' ? '#4caf50' : '#2196F3',
-                        color: '#000', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold'
+                        color: '#000', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', flexShrink: '0'
                     }
                 }, item.type);
                 const nameSpan = createElement('span', {
                     style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
                     title: item.url
                 }, getFilename(item.url));
+                const arrow = createElement('span', { style: { fontSize: '10px', color: '#666', transition: 'transform 0.15s', transform: isOpen ? 'rotate(90deg)' : 'none' } }, isOpen ? '▼' : '▶');
                 titleRow.appendChild(tag);
                 titleRow.appendChild(nameSpan);
+                titleRow.appendChild(arrow);
                 itemWrap.appendChild(titleRow);
 
                 if (isOpen) {
                     const bodyWrap = createElement('div', { style: { padding: '10px', background: '#111' } });
                     // m3u8专属配置
                     if (item.type === 'm3u8') {
-                        // 模式选择
-                        const modeRow = createElement('div', { style: { display: 'flex', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' } });
-                        const radioTime = createElement('input', { type: 'radio', name: `dlmode_${item.id}`, value: 'time', checked: true });
-                        const radioSeg = createElement('input', { type: 'radio', name: `dlmode_${item.id}`, value: 'seg' });
-                        const radioMulti = createElement('input', { type: 'radio', name: `dlmode_${item.id}`, value: 'multi' });
-                        modeRow.appendChild(createElement('label', { style: { whiteSpace: 'nowrap' } }, [radioTime, "时间"]));
-                        modeRow.appendChild(createElement('label', { style: { whiteSpace: 'nowrap' } }, [radioSeg, "切片"]));
-                        modeRow.appendChild(createElement('label', { style: { whiteSpace: 'nowrap' } }, [radioMulti, "多段"]));
-                        bodyWrap.appendChild(modeRow);
-
-                        const timeRow = createElement('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '6px' } });
-                        const inputTStart = createElement('input', { id: `tstart_${item.id}`, type: 'text', value: '00:00:00', style: { width: '90px', padding: '4px', background: '#222', color: '#fff', border: '1px solid #444' } });
-                        const inputTEnd = createElement('input', { id: `tend_${item.id}`, type: 'text', style: { width: '90px', padding: '4px', background: '#222', color: '#fff', border: '1px solid #444' } });
-                        timeRow.appendChild(createElement('span', {}, "时间:"));
-                        timeRow.appendChild(inputTStart);
-                        timeRow.appendChild(createElement('span', {}, "‑"));
-                        timeRow.appendChild(inputTEnd);
-                        bodyWrap.appendChild(timeRow);
-
-                        const segRow = createElement('div', { style: { display: 'none', gap: '4px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '6px' } });
-                        const inputSStart = createElement('input', { id: `sstart_${item.id}`, type: 'number', value: '0', style: { width: '60px', padding: '4px', background: '#222', color: '#fff', border: '1px solid #444' } });
-                        const inputSEnd = createElement('input', { id: `send_${item.id}`, type: 'number', style: { width: '60px', padding: '4px', background: '#222', color: '#fff', border: '1px solid #444' } });
-                        segRow.appendChild(createElement('span', {}, "切片:"));
-                        segRow.appendChild(inputSStart);
-                        segRow.appendChild(createElement('span', {}, "‑"));
-                        segRow.appendChild(inputSEnd);
-                        bodyWrap.appendChild(segRow);
-
                         // 多段模式UI
-                        const multiRow = createElement('div', { style: { display: 'none', marginBottom: '6px' } });
+                        const multiRow = createElement('div', { style: { marginBottom: '6px' } });
                         const segListContainer = createElement('div', { id: `seglist_${item.id}`, style: { maxHeight: '120px', overflowY: 'auto', background: '#0a0a0a', borderRadius: '4px', padding: '4px', marginBottom: '4px', fontSize: '11px' } });
                         segListContainer.innerHTML = '<div style="color:#666;padding:4px">暂无时间段，点击下方按钮添加</div>';
                         const multiBtnRow = createElement('div', { style: { display: 'flex', gap: '4px' } });
@@ -1056,33 +1060,6 @@
                             });
                         }
 
-                        // 切换显示
-                        [radioTime, radioSeg, radioMulti].forEach(r => {
-                            r.addEventListener('change', () => {
-                                timeRow.style.display = r.value === 'time' ? 'flex' : 'none';
-                                segRow.style.display = r.value === 'seg' ? 'flex' : 'none';
-                                multiRow.style.display = r.value === 'multi' ? 'block' : 'none';
-                            });
-                        });
-
-                        // 预览选段按钮（单段模式）
-                        const previewBtn = createElement('button', {
-                            style: { width: '100%', padding: '6px', marginBottom: '6px', background: '#2196F3', border: 'none', color: '#fff', borderRadius: '4px' }
-                        }, "🎬预览选择时间段");
-                        previewBtn.onclick = async () => {
-                            try {
-                                const res = await openPreviewSelectSegment(item.url);
-                                if (res) {
-                                    inputTStart.value = res.startHms;
-                                    inputTEnd.value = res.endHms;
-                                    radioTime.checked = true;
-                                    timeRow.style.display = 'flex';
-                                    segRow.style.display = 'none';
-                                    multiRow.style.display = 'none';
-                                }
-                            } catch (e) { alert("预览失败:" + e.message); }
-                        };
-                        bodyWrap.appendChild(previewBtn);
                     }
 
                     // 按钮行
@@ -1098,24 +1075,11 @@
                     dlBtn.onclick = async () => {
                         const opt = {};
                         if (item.type === 'm3u8') {
-                            const mode = document.querySelector(`input[name="dlmode_${item.id}"]:checked`).value;
-                            if (mode === 'multi') {
-                                if (!item._cutSegments || item._cutSegments.length === 0) {
-                                    alert('请先添加时间段');
-                                    return;
-                                }
-                                opt.ranges = item._cutSegments.map(s => ({ start: s.startSec, end: s.endSec }));
-                            } else if (mode === 'time') {
-                                const tS = document.getElementById(`tstart_${item.id}`).value;
-                                const tE = document.getElementById(`tend_${item.id}`).value;
-                                if (tS && tE) {
-                                    opt.beginSec = toSeconds(tS);
-                                    opt.endSec = toSeconds(tE);
-                                }
-                            } else {
-                                opt.startIdx = parseInt(document.getElementById(`sstart_${item.id}`).value);
-                                opt.endIdx = parseInt(document.getElementById(`send_${item.id}`).value);
+                            if (!item._cutSegments || item._cutSegments.length === 0) {
+                                alert('请先添加时间段');
+                                return;
                             }
+                            opt.ranges = item._cutSegments.map(s => ({ start: s.startSec, end: s.endSec }));
                         }
                         await window.TaskRunner(item.url, item.type, dlBtn, opt);
                     };
