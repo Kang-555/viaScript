@@ -839,13 +839,13 @@
             startSec = Math.min(sec, endSec);
             video.currentTime = startSec;
             t1Text.textContent = `起始：${formatTimeHMS(startSec)}`;
-            durText.children[1].textContent = `已选：${formatTimeHMS(endSec - startSec)}`;
+            durText.textContent = `总时长：${formatTimeHMS(totalDuration)} | 已选：${formatTimeHMS(endSec - startSec)} | ${parseRet.segments.length}分片`;
         });
         const sliderEnd = buildSlider("结束时间", endSec / safeTotal, (sec) => {
             endSec = Math.max(sec, startSec);
             video.currentTime = endSec;
             t2Text.textContent = `结束：${formatTimeHMS(endSec)}`;
-            durText.children[1].textContent = `已选：${formatTimeHMS(endSec - startSec)}`;
+            durText.textContent = `总时长：${formatTimeHMS(totalDuration)} | 已选：${formatTimeHMS(endSec - startSec)} | ${parseRet.segments.length}分片`;
         });
 
         const confirmBtn = createElement('button', {
