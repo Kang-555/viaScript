@@ -735,26 +735,37 @@
                 }
             }
 
-            // 多时间段独立下载
+            // 多时间段并发下载，下完一段立即保存
             if (opt.ranges && opt.ranges.length > 0) {
-                const multiWriter = new MultiSegmentWriter();
-                for (let i = 0; i < opt.ranges.length; i++) {
-                    const range = opt.ranges[i];
+                const downloadTasks = opt.ranges.map((range, i) => {
                     const mapped = timeToSegmentIndex(parseRet.timeList, range.start, range.end);
                     const rangeIndices = [];
                     for (let j = mapped.startIdx; j <= mapped.endIdx; j++) {
                         if (!rangeIndices.includes(j)) rangeIndices.push(j);
                     }
+                    return { index: i, rangeIndices, start: range.start, end: range.end };
+                });
+
+                btn.textContent = `并发下载 ${downloadTasks.length} 段中...`;
+                const allWriters = new Array(downloadTasks.length);
+
+                // 并发下载
+                const promises = downloadTasks.map(async (task) => {
                     const rangeWriter = new VideoWriter();
-                    btn.textContent = `段${i + 1}/${opt.ranges.length}: 下载中`;
                     await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => {
-                        btn.textContent = `段${i + 1}/${opt.ranges.length}: ${txt}`;
-                    }, rangeWriter, rangeIndices);
-                    multiWriter.addSegment(`part${i + 1}`, rangeWriter.fixedBuffers);
-                }
-                btn.textContent = "保存文件";
-                await multiWriter.saveAll(filename);
-                btn.textContent = `✅下载完成(${opt.ranges.length}段)`;
+                        btn.textContent = `段${task.index + 1}: ${txt}`;
+                    }, rangeWriter, task.rangeIndices);
+                    allWriters[task.index] = rangeWriter;
+                    // 该段下载完，立即触发保存
+                    const segFilename = downloadTasks.length === 1
+                        ? filename.replace(/\.zip$/i, '.ts')
+                        : filename.replace(/\.zip$/i, '').replace(/\.[^.]+$/, '') + `_part${task.index + 1}.ts`;
+                    await rangeWriter.close(segFilename);
+                    console.log(`✅ 段${task.index + 1} 已保存`);
+                });
+
+                await Promise.all(promises);
+                btn.textContent = `✅下载完成(${downloadTasks.length}段)`;
             } else {
                 // 全量下载
                 const writer = new VideoWriter();
