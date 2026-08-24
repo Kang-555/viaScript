@@ -327,6 +327,158 @@
     }
 
     // ==========================================
+    // TS时间戳修复器
+    // ==========================================
+    const TSPacketFixer = {
+        TS_PACKET_SIZE: 188,
+        SYNC_BYTE: 0x47,
+        PCR_TIMEBASE: 90000,
+
+        readPCR(buf, offset) {
+            const pcrBase = (buf[offset] << 25) | (buf[offset + 1] << 17) | (buf[offset + 2] << 9) | (buf[offset + 3] << 1) | (buf[offset + 4] >> 7);
+            const pcrExt = ((buf[offset + 4] >> 1) & 0x01) | ((buf[offset + 5] & 0x01) << 8);
+            return pcrBase * 300 + pcrExt;
+        },
+
+        writePCR(buf, offset, pcrValue) {
+            const pcrBase = Math.floor(pcrValue / 300);
+            const pcrExt = pcrValue % 300;
+            buf[offset] = (pcrBase >> 25) & 0xFF;
+            buf[offset + 1] = (pcrBase >> 17) & 0xFF;
+            buf[offset + 2] = (pcrBase >> 9) & 0xFF;
+            buf[offset + 3] = (pcrBase >> 1) & 0xFF;
+            buf[offset + 4] = ((pcrBase & 0x01) << 7) | ((pcrExt >> 8) & 0x01) | 0x10;
+            buf[offset + 5] = pcrExt & 0xFF;
+        },
+
+        readPTS(buf, offset) {
+            const b0 = buf[offset];
+            const b1 = buf[offset + 1];
+            const b2 = buf[offset + 2];
+            const b3 = buf[offset + 3];
+            const b4 = buf[offset + 4];
+            let pts = 0;
+            pts |= ((b0 & 0x0E) << 29);
+            pts |= (b1 << 22);
+            pts |= ((b2 & 0xFE) << 14);
+            pts |= (b3 << 7);
+            pts |= (b4 >> 1);
+            return pts >>> 0;
+        },
+
+        writePTS(buf, offset, ptsValue) {
+            const v = ptsValue >>> 0;
+            buf[offset] = (buf[offset] & 0xF0) | ((v >> 29) & 0x0E);
+            buf[offset + 1] = (v >> 22) & 0xFF;
+            buf[offset + 2] = ((v >> 14) & 0xFE) | 0x01;
+            buf[offset + 3] = (v >> 7) & 0xFF;
+            buf[offset + 4] = ((v << 1) & 0xFE) | 0x01;
+        },
+
+        getPCRRanges(data) {
+            let firstPCR = null;
+            let lastPCR = null;
+            const len = data.length;
+            for (let i = 0; i + this.TS_PACKET_SIZE <= len; i += this.TS_PACKET_SIZE) {
+                if (data[i] !== this.SYNC_BYTE) continue;
+                const hasAdaptation = (data[i + 3] & 0x20) !== 0;
+                if (!hasAdaptation) continue;
+                const adaptationOffset = i + 4;
+                const adaptationLength = data[adaptationOffset];
+                if (adaptationLength <= 0 || adaptationOffset + 1 + adaptationLength > i + this.TS_PACKET_SIZE) continue;
+                const pcrFlag = (data[adaptationOffset + 1] >> 4) & 0x01;
+                if (!pcrFlag) continue;
+                const pcrOffset = adaptationOffset + 2;
+                const pcr = this.readPCR(data, pcrOffset);
+                if (firstPCR === null) firstPCR = pcr;
+                lastPCR = pcr;
+            }
+            return { firstPCR, lastPCR };
+        },
+
+        applyTimestampOffset(data, offset) {
+            if (offset === 0) return data;
+            const len = data.length;
+            const result = new Uint8Array(data);
+            for (let i = 0; i + this.TS_PACKET_SIZE <= len; i += this.TS_PACKET_SIZE) {
+                if (result[i] !== this.SYNC_BYTE) continue;
+                const hasAdaptation = (result[i + 3] & 0x20) !== 0;
+                const hasPayload = (result[i + 3] & 0x10) !== 0;
+                if (hasAdaptation) {
+                    const adaptationOffset = i + 4;
+                    const adaptationLength = result[adaptationOffset];
+                    if (adaptationLength > 0 && adaptationOffset + 1 + adaptationLength <= i + this.TS_PACKET_SIZE) {
+                        const pcrFlag = (result[adaptationOffset + 1] >> 4) & 0x01;
+                        if (pcrFlag) {
+                            const pcrOffset = adaptationOffset + 2;
+                            const pcr = this.readPCR(result, pcrOffset);
+                            this.writePCR(result, pcrOffset, (pcr + offset) >>> 0);
+                        }
+                    }
+                }
+                if (hasPayload) {
+                    const payloadUnitStart = (result[i + 1] >> 6) & 0x01;
+                    let payloadOffset = i + 4;
+                    if (hasAdaptation) {
+                        const adaptationLength = result[payloadOffset];
+                        payloadOffset += 1 + adaptationLength;
+                    }
+                    if (payloadUnitStart && payloadOffset + 6 <= len) {
+                        const streamId = result[payloadOffset];
+                        if (streamId === 0xBD || (streamId >= 0xC0 && streamId <= 0xDF) || (streamId >= 0xE0 && streamId <= 0xEF)) {
+                            const ptsDtsFlag = (result[payloadOffset + 3] >> 6) & 0x03;
+                            const ptsOffset = payloadOffset + 3;
+                            if ((ptsDtsFlag & 0x02) && ptsOffset + 5 <= len) {
+                                const pts = this.readPTS(result, ptsOffset + 1);
+                                this.writePTS(result, ptsOffset + 1, (pts + offset) >>> 0);
+                            }
+                            if (ptsDtsFlag === 0x03 && ptsOffset + 10 <= len) {
+                                const dtsOffset = ptsOffset + 5;
+                                const dts = this.readPTS(result, dtsOffset);
+                                this.writePTS(result, dtsOffset, (dts + offset) >>> 0);
+                            }
+                        }
+                    }
+                }
+            }
+            return result;
+        },
+
+        fixTimestamps(buffers) {
+            if (buffers.length === 0) return new Uint8Array(0);
+            if (buffers.length === 1) return buffers[0];
+            let cumulativeOffset = 0;
+            let lastEndPCR = null;
+            const fixedBuffers = [];
+            for (let i = 0; i < buffers.length; i++) {
+                const buf = buffers[i];
+                const { firstPCR, lastPCR } = this.getPCRRanges(buf);
+                if (lastEndPCR !== null && firstPCR !== null) {
+                    const gap = lastEndPCR - firstPCR;
+                    if (gap !== 0) {
+                        cumulativeOffset += gap;
+                        console.log(`[TSPacketFixer] 分片${i} 时间戳偏移: +${(gap / this.PCR_TIMEBASE).toFixed(2)}s (累计: ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s)`);
+                    }
+                }
+                const fixedBuf = this.applyTimestampOffset(buf, cumulativeOffset);
+                fixedBuffers.push(fixedBuf);
+                if (lastPCR !== null) {
+                    lastEndPCR = lastPCR + cumulativeOffset;
+                }
+            }
+            const totalSize = fixedBuffers.reduce((sum, b) => sum + b.length, 0);
+            const result = new Uint8Array(totalSize);
+            let offset = 0;
+            for (const fb of fixedBuffers) {
+                result.set(fb, offset);
+                offset += fb.length;
+            }
+            console.log(`[TSPacketFixer] 时间戳修复完成: ${buffers.length}个分片, 总时长偏移 ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s`);
+            return result;
+        }
+    };
+
+    // ==========================================
     // 文件写入器
     // ==========================================
     class VideoWriter {
@@ -344,7 +496,8 @@
                 alert('分片数据为空，无法保存');
                 return;
             }
-            const blob = new Blob(this.buffers, { type: 'video/mp2t' });
+            const tsData = TSPacketFixer.fixTimestamps(this.buffers);
+            const blob = new Blob([tsData], { type: 'video/mp2t' });
             downloadBlob(blob, filename.replace(/\.zip$/i, '.ts'));
         }
     }
@@ -433,10 +586,11 @@
     // ==========================================
     // m3u8分片下载
     // ==========================================
-    async function downloadM3u8BySegments(segments, keyCache, onProgress, writer, startIdx, endIdx) {
+    async function downloadM3u8BySegments(segments, keyCache, onProgress, writer, segmentIndices = null) {
         let workSegments = [...segments];
-        if (Number.isInteger(startIdx) && Number.isInteger(endIdx)) {
-            workSegments = workSegments.slice(startIdx, endIdx + 1);
+        if (segmentIndices && segmentIndices.length > 0) {
+            const indexSet = new Set(segmentIndices);
+            workSegments = segments.filter((_, i) => indexSet.has(i));
             if (workSegments.length === 0) throw new Error("分片过滤后为空");
         }
         const maxThreads = 4;
@@ -539,11 +693,28 @@
             if (type === 'm3u8') {
                 btn.textContent = "解析m3u8...";
                 const parseRet = await parseM3u8(url);
-                let { startIdx, endIdx } = opt;
-                if (opt.beginSec !== undefined && opt.endSec !== undefined) {
+                let segmentIndices = null;
+                if (opt.ranges && opt.ranges.length > 0) {
+                    segmentIndices = [];
+                    for (const r of opt.ranges) {
+                        const mapped = timeToSegmentIndex(parseRet.timeList, r.start, r.end);
+                        for (let i = mapped.startIdx; i <= mapped.endIdx; i++) {
+                            if (!segmentIndices.includes(i)) segmentIndices.push(i);
+                        }
+                    }
+                    segmentIndices.sort((a, b) => a - b);
+                    console.log('[TaskRunner] 多段模式，选中分片数:', segmentIndices.length);
+                } else if (opt.beginSec !== undefined && opt.endSec !== undefined) {
                     const mapped = timeToSegmentIndex(parseRet.timeList, opt.beginSec, opt.endSec);
-                    startIdx = mapped.startIdx;
-                    endIdx = mapped.endIdx;
+                    segmentIndices = [];
+                    for (let i = mapped.startIdx; i <= mapped.endIdx; i++) segmentIndices.push(i);
+                    console.log('[TaskRunner] 单段时间换算分片:', mapped.startIdx, '-', mapped.endIdx);
+                } else if (opt.startIdx !== undefined && opt.endIdx !== undefined) {
+                    segmentIndices = [];
+                    for (let i = opt.startIdx; i <= opt.endIdx; i++) segmentIndices.push(i);
+                    console.log('[TaskRunner] 分片索引:', opt.startIdx, '-', opt.endIdx);
+                } else {
+                    console.log('[TaskRunner] 未指定分片/时间范围，将下载全部分片');
                 }
                 // 加载密钥
                 const keyCache = new Map();
@@ -556,7 +727,7 @@
                     }
                 }
                 btn.textContent = "分片下载中";
-                await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => { btn.textContent = txt; }, writer, startIdx, endIdx);
+                await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => { btn.textContent = txt; }, writer, segmentIndices);
                 btn.textContent = "保存文件";
                 await writer.close(filename);
                 btn.textContent = "✅下载完成";
@@ -788,11 +959,13 @@
                     // m3u8专属配置
                     if (item.type === 'm3u8') {
                         // 模式选择
-                        const modeRow = createElement('div', { style: { display: 'flex', gap: '12px', marginBottom: '6px' } });
+                        const modeRow = createElement('div', { style: { display: 'flex', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' } });
                         const radioTime = createElement('input', { type: 'radio', name: `dlmode_${item.id}`, value: 'time', checked: true });
                         const radioSeg = createElement('input', { type: 'radio', name: `dlmode_${item.id}`, value: 'seg' });
-                        modeRow.appendChild(createElement('label', {}, [radioTime, "时间范围"]));
-                        modeRow.appendChild(createElement('label', {}, [radioSeg, "切片范围"]));
+                        const radioMulti = createElement('input', { type: 'radio', name: `dlmode_${item.id}`, value: 'multi' });
+                        modeRow.appendChild(createElement('label', { style: { whiteSpace: 'nowrap' } }, [radioTime, "时间"]));
+                        modeRow.appendChild(createElement('label', { style: { whiteSpace: 'nowrap' } }, [radioSeg, "切片"]));
+                        modeRow.appendChild(createElement('label', { style: { whiteSpace: 'nowrap' } }, [radioMulti, "多段"]));
                         bodyWrap.appendChild(modeRow);
 
                         const timeRow = createElement('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '6px' } });
@@ -813,15 +986,86 @@
                         segRow.appendChild(inputSEnd);
                         bodyWrap.appendChild(segRow);
 
+                        // 多段模式UI
+                        const multiRow = createElement('div', { style: { display: 'none', marginBottom: '6px' } });
+                        const segListContainer = createElement('div', { id: `seglist_${item.id}`, style: { maxHeight: '120px', overflowY: 'auto', background: '#0a0a0a', borderRadius: '4px', padding: '4px', marginBottom: '4px', fontSize: '11px' } });
+                        segListContainer.innerHTML = '<div style="color:#666;padding:4px">暂无时间段，点击下方按钮添加</div>';
+                        const multiBtnRow = createElement('div', { style: { display: 'flex', gap: '4px' } });
+                        const addSegBtn = createElement('button', { style: { flex: 1, padding: '4px', background: '#2196F3', border: 'none', color: '#fff', borderRadius: '3px', fontSize: '11px' } }, "➕ 预览添加时间段");
+                        const clearSegBtn = createElement('button', { style: { padding: '4px 8px', background: '#f44336', border: 'none', color: '#fff', borderRadius: '3px', fontSize: '11px' } }, "🗑 清空");
+                        multiBtnRow.appendChild(addSegBtn);
+                        multiBtnRow.appendChild(clearSegBtn);
+                        multiRow.appendChild(segListContainer);
+                        multiRow.appendChild(multiBtnRow);
+                        bodyWrap.appendChild(multiRow);
+
+                        // 存储多段数据
+                        item._cutSegments = [];
+                        item._parsedM3u8 = null;
+
+                        addSegBtn.onclick = async () => {
+                            try {
+                                if (!item._parsedM3u8) {
+                                    addSegBtn.textContent = '解析中...';
+                                    item._parsedM3u8 = await parseM3u8(item.url);
+                                    addSegBtn.textContent = '➕ 预览添加时间段';
+                                }
+                                const res = await openPreviewSelectSegment(item.url);
+                                if (res) {
+                                    const { startIdx, endIdx } = timeToSegmentIndex(item._parsedM3u8.timeList, res.startSec, res.endSec);
+                                    item._cutSegments.push({
+                                        id: 'seg_' + Math.random().toString(36).slice(2, 6),
+                                        startSec: res.startSec,
+                                        endSec: res.endSec,
+                                        startIdx,
+                                        endIdx,
+                                        duration: res.endSec - res.startSec
+                                    });
+                                    renderSegList(item.id, item._cutSegments);
+                                }
+                            } catch (e) { alert("添加失败:" + e.message); }
+                        };
+
+                        clearSegBtn.onclick = () => {
+                            item._cutSegments = [];
+                            renderSegList(item.id, item._cutSegments);
+                        };
+
+                        function renderSegList(itemId, segments) {
+                            const container = document.getElementById(`seglist_${itemId}`);
+                            if (!container) return;
+                            if (segments.length === 0) {
+                                container.innerHTML = '<div style="color:#666;padding:4px">暂无时间段，点击下方按钮添加</div>';
+                                return;
+                            }
+                            const totalDur = segments.reduce((sum, s) => sum + s.duration, 0);
+                            const totalSegs = segments.reduce((sum, s) => sum + (s.endIdx - s.startIdx + 1), 0);
+                            container.innerHTML = segments.map((seg, i) => `
+                                <div style="display:flex;align-items:center;gap:4px;padding:3px 4px;border-bottom:1px solid #222">
+                                    <span style="color:#4caf50;font-weight:bold">${i + 1}.</span>
+                                    <span style="flex:1">${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)}</span>
+                                    <span style="color:#888">${seg.duration.toFixed(1)}s</span>
+                                    <button data-seg-id="${seg.id}" style="background:#f44336;border:none;color:#fff;border-radius:2px;padding:1px 5px;font-size:10px;cursor:pointer">×</button>
+                                </div>
+                            `).join('') + `<div style="color:#4caf50;padding:4px;font-weight:bold">合计: ${segments.length}段 | ${formatTimeHMS(totalDur)} | ~${totalSegs}分片</div>`;
+                            container.querySelectorAll('[data-seg-id]').forEach(btn => {
+                                btn.onclick = () => {
+                                    item._cutSegments = item._cutSegments.filter(s => s.id !== btn.dataset.segId);
+                                    renderSegList(itemId, item._cutSegments);
+                                };
+                            });
+                        }
+
                         // 切换显示
-                        [radioTime, radioSeg].forEach(r => {
+                        [radioTime, radioSeg, radioMulti].forEach(r => {
                             r.addEventListener('change', () => {
                                 timeRow.style.display = r.value === 'time' ? 'flex' : 'none';
                                 segRow.style.display = r.value === 'seg' ? 'flex' : 'none';
+                                multiRow.style.display = r.value === 'multi' ? 'block' : 'none';
                             });
                         });
 
-                        // 预览选段按钮
+                        // 预览选段按钮（单段模式）
                         const previewBtn = createElement('button', {
                             style: { width: '100%', padding: '6px', marginBottom: '6px', background: '#2196F3', border: 'none', color: '#fff', borderRadius: '4px' }
                         }, "🎬预览选择时间段");
@@ -834,6 +1078,7 @@
                                     radioTime.checked = true;
                                     timeRow.style.display = 'flex';
                                     segRow.style.display = 'none';
+                                    multiRow.style.display = 'none';
                                 }
                             } catch (e) { alert("预览失败:" + e.message); }
                         };
@@ -854,7 +1099,13 @@
                         const opt = {};
                         if (item.type === 'm3u8') {
                             const mode = document.querySelector(`input[name="dlmode_${item.id}"]:checked`).value;
-                            if (mode === 'time') {
+                            if (mode === 'multi') {
+                                if (!item._cutSegments || item._cutSegments.length === 0) {
+                                    alert('请先添加时间段');
+                                    return;
+                                }
+                                opt.ranges = item._cutSegments.map(s => ({ start: s.startSec, end: s.endSec }));
+                            } else if (mode === 'time') {
                                 const tS = document.getElementById(`tstart_${item.id}`).value;
                                 const tE = document.getElementById(`tend_${item.id}`).value;
                                 if (tS && tE) {

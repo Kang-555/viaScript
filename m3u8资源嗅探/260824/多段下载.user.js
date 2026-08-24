@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         多段下载器
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -521,7 +521,7 @@
 
                 if (lastEndPCR !== null && firstPCR !== null) {
                     const gap = lastEndPCR - firstPCR;
-                    if (gap > 0) {
+                    if (gap !== 0) {
                         cumulativeOffset += gap;
                         console.log(`[TSPacketFixer] 分片${i} 时间戳偏移: +${(gap / this.PCR_TIMEBASE).toFixed(2)}s (累计: ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s)`);
                     }

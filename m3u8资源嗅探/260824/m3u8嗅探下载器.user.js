@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8嗅探下载器
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.1
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -346,6 +346,182 @@
     // ==========================================
     // 下载管理器
     // ==========================================
+    // ==========================================
+    // 6. TS时间戳修复器
+    // ==========================================
+    const TSPacketFixer = {
+        TS_PACKET_SIZE: 188,
+        SYNC_BYTE: 0x47,
+        PCR_TIMEBASE: 90000,
+
+        readPCR(buf, offset) {
+            const pcrBase = (buf[offset] << 25) | (buf[offset + 1] << 17) | (buf[offset + 2] << 9) | (buf[offset + 3] << 1) | (buf[offset + 4] >> 7);
+            const pcrExt = ((buf[offset + 4] >> 1) & 0x01) | ((buf[offset + 5] & 0x01) << 8);
+            return pcrBase * 300 + pcrExt;
+        },
+
+        writePCR(buf, offset, pcrValue) {
+            const pcrBase = Math.floor(pcrValue / 300);
+            const pcrExt = pcrValue % 300;
+            buf[offset] = (pcrBase >> 25) & 0xFF;
+            buf[offset + 1] = (pcrBase >> 17) & 0xFF;
+            buf[offset + 2] = (pcrBase >> 9) & 0xFF;
+            buf[offset + 3] = (pcrBase >> 1) & 0xFF;
+            buf[offset + 4] = ((pcrBase & 0x01) << 7) | ((pcrExt >> 8) & 0x01) | 0x10;
+            buf[offset + 5] = pcrExt & 0xFF;
+        },
+
+        readPTS(buf, offset) {
+            const b0 = buf[offset];
+            const b1 = buf[offset + 1];
+            const b2 = buf[offset + 2];
+            const b3 = buf[offset + 3];
+            const b4 = buf[offset + 4];
+            let pts = 0;
+            pts |= ((b0 & 0x0E) << 29);
+            pts |= (b1 << 22);
+            pts |= ((b2 & 0xFE) << 14);
+            pts |= (b3 << 7);
+            pts |= (b4 >> 1);
+            return pts >>> 0;
+        },
+
+        writePTS(buf, offset, ptsValue) {
+            const v = ptsValue >>> 0;
+            buf[offset] = (buf[offset] & 0xF0) | ((v >> 29) & 0x0E);
+            buf[offset + 1] = (v >> 22) & 0xFF;
+            buf[offset + 2] = ((v >> 14) & 0xFE) | 0x01;
+            buf[offset + 3] = (v >> 7) & 0xFF;
+            buf[offset + 4] = ((v << 1) & 0xFE) | 0x01;
+        },
+
+        getPCRRanges(data) {
+            let firstPCR = null;
+            let lastPCR = null;
+            const len = data.length;
+
+            for (let i = 0; i + this.TS_PACKET_SIZE <= len; i += this.TS_PACKET_SIZE) {
+                if (data[i] !== this.SYNC_BYTE) continue;
+
+                const hasAdaptation = (data[i + 3] & 0x20) !== 0;
+                if (!hasAdaptation) continue;
+
+                const adaptationOffset = i + 4;
+                const adaptationLength = data[adaptationOffset];
+                if (adaptationLength <= 0 || adaptationOffset + 1 + adaptationLength > i + this.TS_PACKET_SIZE) continue;
+
+                const pcrFlag = (data[adaptationOffset + 1] >> 4) & 0x01;
+                if (!pcrFlag) continue;
+
+                const pcrOffset = adaptationOffset + 2;
+                const pcr = this.readPCR(data, pcrOffset);
+
+                if (firstPCR === null) firstPCR = pcr;
+                lastPCR = pcr;
+            }
+
+            return { firstPCR, lastPCR };
+        },
+
+        applyTimestampOffset(data, offset) {
+            if (offset === 0) return data;
+
+            const len = data.length;
+            const result = new Uint8Array(data);
+
+            for (let i = 0; i + this.TS_PACKET_SIZE <= len; i += this.TS_PACKET_SIZE) {
+                if (result[i] !== this.SYNC_BYTE) continue;
+
+                const hasAdaptation = (result[i + 3] & 0x20) !== 0;
+                const hasPayload = (result[i + 3] & 0x10) !== 0;
+
+                if (hasAdaptation) {
+                    const adaptationOffset = i + 4;
+                    const adaptationLength = result[adaptationOffset];
+                    if (adaptationLength > 0 && adaptationOffset + 1 + adaptationLength <= i + this.TS_PACKET_SIZE) {
+                        const pcrFlag = (result[adaptationOffset + 1] >> 4) & 0x01;
+                        if (pcrFlag) {
+                            const pcrOffset = adaptationOffset + 2;
+                            const pcr = this.readPCR(result, pcrOffset);
+                            this.writePCR(result, pcrOffset, (pcr + offset) >>> 0);
+                        }
+                    }
+                }
+
+                if (hasPayload) {
+                    const payloadUnitStart = (result[i + 1] >> 6) & 0x01;
+                    let payloadOffset = i + 4;
+                    if (hasAdaptation) {
+                        const adaptationLength = result[payloadOffset];
+                        payloadOffset += 1 + adaptationLength;
+                    }
+
+                    if (payloadUnitStart && payloadOffset + 6 <= len) {
+                        const streamId = result[payloadOffset];
+                        if (streamId === 0xBD || (streamId >= 0xC0 && streamId <= 0xDF) || (streamId >= 0xE0 && streamId <= 0xEF)) {
+                            const pesHeaderLen = result[payloadOffset + 2];
+                            const ptsDtsFlag = (result[payloadOffset + 3] >> 6) & 0x03;
+                            const ptsOffset = payloadOffset + 3;
+
+                            if ((ptsDtsFlag & 0x02) && ptsOffset + 5 <= len) {
+                                const pts = this.readPTS(result, ptsOffset + 1);
+                                this.writePTS(result, ptsOffset + 1, (pts + offset) >>> 0);
+                            }
+
+                            if (ptsDtsFlag === 0x03 && ptsOffset + 10 <= len) {
+                                const dtsOffset = ptsOffset + 5;
+                                const dts = this.readPTS(result, dtsOffset);
+                                this.writePTS(result, dtsOffset, (dts + offset) >>> 0);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return result;
+        },
+
+        fixTimestamps(buffers) {
+            if (buffers.length === 0) return new Uint8Array(0);
+            if (buffers.length === 1) return buffers[0];
+
+            let cumulativeOffset = 0;
+            let lastEndPCR = null;
+            const fixedBuffers = [];
+
+            for (let i = 0; i < buffers.length; i++) {
+                const buf = buffers[i];
+                const { firstPCR, lastPCR } = this.getPCRRanges(buf);
+
+                if (lastEndPCR !== null && firstPCR !== null) {
+                    const gap = lastEndPCR - firstPCR;
+                    if (gap !== 0) {
+                        cumulativeOffset += gap;
+                        console.log(`[TSPacketFixer] 分片${i} 时间戳偏移: +${(gap / this.PCR_TIMEBASE).toFixed(2)}s (累计: ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s)`);
+                    }
+                }
+
+                const fixedBuf = this.applyTimestampOffset(buf, cumulativeOffset);
+                fixedBuffers.push(fixedBuf);
+
+                if (lastPCR !== null) {
+                    lastEndPCR = lastPCR + cumulativeOffset;
+                }
+            }
+
+            const totalSize = fixedBuffers.reduce((sum, b) => sum + b.length, 0);
+            const result = new Uint8Array(totalSize);
+            let offset = 0;
+            for (const fb of fixedBuffers) {
+                result.set(fb, offset);
+                offset += fb.length;
+            }
+
+            console.log(`[TSPacketFixer] 时间戳修复完成: ${buffers.length}个分片, 总时长偏移 ${(cumulativeOffset / this.PCR_TIMEBASE).toFixed(2)}s`);
+            return result;
+        }
+    };
+
     class VideoWriter {
         constructor() {
             this.buffers = [];
@@ -363,7 +539,8 @@
                 alert('下载失败：获取分片数据为空');
                 return;
             }
-            const tsBlob = new Blob(this.buffers, { type: 'video/mp2t' });
+            const tsData = TSPacketFixer.fixTimestamps(this.buffers);
+            const tsBlob = new Blob([tsData], { type: 'video/mp2t' });
             Utils.downloadBlob(tsBlob, filename.replace(/\.zip$/i, '.ts'));
         }
     }
