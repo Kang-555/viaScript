@@ -465,10 +465,11 @@
         return { startIdx, endIdx };
     };
 
-    const downloadM3u8BySegments = async (segments, keyCache, onProgress, writer, startIdx = null, endIdx = null, skipClose = false) => {
+    const downloadM3u8BySegments = async (segments, keyCache, onProgress, writer, segmentIndices = null, skipClose = false) => {
         let workSegments = [...segments];
-        if (Number.isInteger(startIdx) && Number.isInteger(endIdx)) {
-            workSegments = workSegments.slice(startIdx, endIdx + 1);
+        if (segmentIndices && segmentIndices.length > 0) {
+            const indexSet = new Set(segmentIndices);
+            workSegments = segments.filter((_, i) => indexSet.has(i));
             if (workSegments.length === 0) throw new Error("分片范围过滤后为空");
         }
         console.log('[downloadM3u8BySegments] 待下载分片数:', workSegments.length, '线程数:', Math.min(Config.maxThreads, workSegments.length));
@@ -650,15 +651,27 @@
                 const { segments, timeList, targetDuration } = parseResult;
                 console.log('[TaskRunner] 解析完成, 分片数:', segments.length);
 
-                let startIdx = opt.startIdx ?? null;
-                let endIdx = opt.endIdx ?? null;
-
-                if (opt.beginSec !== undefined && opt.endSec !== undefined) {
+                let segmentIndices = null;
+                if (opt.ranges && opt.ranges.length > 0) {
+                    segmentIndices = [];
+                    for (const r of opt.ranges) {
+                        const mapped = timeToSegmentIndex(timeList, r.start, r.end);
+                        for (let i = mapped.startIdx; i <= mapped.endIdx; i++) {
+                            if (!segmentIndices.includes(i)) segmentIndices.push(i);
+                        }
+                    }
+                    segmentIndices.sort((a, b) => a - b);
+                    console.log('[TaskRunner] 多段模式，选中分片数:', segmentIndices.length);
+                } else if (opt.beginSec !== undefined && opt.endSec !== undefined) {
                     const mapped = timeToSegmentIndex(timeList, opt.beginSec, opt.endSec);
-                    startIdx = mapped.startIdx;
-                    endIdx = mapped.endIdx;
-                    console.log('[TaskRunner] 时间换算分片:', startIdx, '-', endIdx);
-                } else if (startIdx === null || endIdx === null) {
+                    segmentIndices = [];
+                    for (let i = mapped.startIdx; i <= mapped.endIdx; i++) segmentIndices.push(i);
+                    console.log('[TaskRunner] 单段时间换算分片:', mapped.startIdx, '-', mapped.endIdx);
+                } else if (opt.startIdx !== undefined && opt.endIdx !== undefined) {
+                    segmentIndices = [];
+                    for (let i = opt.startIdx; i <= opt.endIdx; i++) segmentIndices.push(i);
+                    console.log('[TaskRunner] 分片索引:', opt.startIdx, '-', opt.endIdx);
+                } else {
                     console.log('[TaskRunner] 未指定分片/时间范围，将下载全部分片');
                 }
 
@@ -672,7 +685,7 @@
                     }
                 }
                 console.log('[TaskRunner] 开始下载分片');
-                await downloadM3u8BySegments(segments, keyCache, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer, startIdx, endIdx, false);
+                await downloadM3u8BySegments(segments, keyCache, (pct, txt) => { if (btn) btn.textContent = txt || pct + '%'; }, writer, segmentIndices, false);
                 console.log('[TaskRunner] 分片下载完成');
                 if (btn) btn.textContent = '保存中...';
                 console.log('[TaskRunner] 生成TS文件:', filename);
@@ -1406,6 +1419,9 @@
                 const segDuration = segments.slice(segItem.startIdx, segItem.endIdx + 1)
                     .reduce((s, seg) => s + (seg.dur || 0), 0);
 
+                const segIndices = [];
+                for (let i = segItem.startIdx; i <= segItem.endIdx; i++) segIndices.push(i);
+
                 await downloadM3u8BySegments(
                     segments,
                     keyCache,
@@ -1417,8 +1433,7 @@
                         onProgress(overallPct, textSeg, { ...infoSeg, totalDurationAll });
                     },
                     writer,
-                    segItem.startIdx,
-                    segItem.endIdx,
+                    segIndices,
                     true
                 );
                 accumulatedDuration += segDuration;
