@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      6.6
+// @version      6.7
 // @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
@@ -777,29 +777,36 @@
                 const progressStates = new Array(downloadTasks.length).fill(0);
                 let lastProgressUpdate = 0;
 
-                // 并发下载
-                const promises = downloadTasks.map(async (task) => {
-                    const rangeWriter = new VideoWriter();
-                    await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => {
-                        progressStates[task.index] = p;
-                        const now = Date.now();
-                        if (now - lastProgressUpdate > 150) {
-                            btn.textContent = `下载中`;
-                            lastProgressUpdate = now;
-                        }
-                        if (opt.onRangeProgress) {
-                            opt.onRangeProgress(task.index, p);
-                        }
-                    }, rangeWriter, task.rangeIndices, opt.onSegmentDone);
-                    allWriters[task.index] = rangeWriter;
-                    const segFilename = downloadTasks.length === 1
-                        ? filename.replace(/\.zip$/i, '.ts')
-                        : filename.replace(/\.zip$/i, '').replace(/\.[^.]+$/, '') + `_part${task.index + 1}.ts`;
-                    await rangeWriter.close(segFilename);
-                    console.log(`✅ 段${task.index + 1} 已保存`);
-                });
+                // 限制最大并发数为2
+                const MAX_CONCURRENT = 2;
+                const batchSize = Math.min(MAX_CONCURRENT, downloadTasks.length);
 
-                await Promise.all(promises);
+                // 分批下载，每批最多2个并发
+                for (let batchStart = 0; batchStart < downloadTasks.length; batchStart += batchSize) {
+                    const batch = downloadTasks.slice(batchStart, batchStart + batchSize);
+                    const batchPromises = batch.map(async (task) => {
+                        const rangeWriter = new VideoWriter();
+                        await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => {
+                            progressStates[task.index] = p;
+                            const now = Date.now();
+                            if (now - lastProgressUpdate > 150) {
+                                btn.textContent = `下载中`;
+                                lastProgressUpdate = now;
+                            }
+                            if (opt.onRangeProgress) {
+                                opt.onRangeProgress(task.index, p);
+                            }
+                        }, rangeWriter, task.rangeIndices, opt.onSegmentDone);
+                        allWriters[task.index] = rangeWriter;
+                        const segFilename = downloadTasks.length === 1
+                            ? filename.replace(/\.zip$/i, '.ts')
+                            : filename.replace(/\.zip$/i, '').replace(/\.[^.]+$/, '') + `_part${task.index + 1}.ts`;
+                        await rangeWriter.close(segFilename);
+                        console.log(`✅ 段${task.index + 1} 已保存`);
+                    });
+                    await Promise.all(batchPromises);
+                }
+
                 btn.textContent = `✅下载完成`;
             } else {
                 // 全量下载

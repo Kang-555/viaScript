@@ -170,13 +170,13 @@
     // 生成 M3U8 并触发 1DM
     // ==========================================
     function trigger1DM(m3u8Text, filename) {
-        // 将 m3u8 内容转为 Blob 并下载
-        const blob = new Blob([m3u8Text], { type: 'application/x-mpegurl' });
-        const url = URL.createObjectURL(blob);
+        // 方式1：使用 data URI 格式，1DM 更容易识别
+        const base64 = btoa(unescape(encodeURIComponent(m3u8Text)));
+        const dataUri = `data:application/x-mpegurl;base64,${base64}`;
 
         // 创建下载链接
         const a = document.createElement('a');
-        a.href = url;
+        a.href = dataUri;
         a.download = filename;
         a.style.display = 'none';
         document.body.appendChild(a);
@@ -185,10 +185,9 @@
         // 清理
         setTimeout(() => {
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
         }, 100);
 
-        console.log('[1DM] M3U8 文件已下载:', filename);
+        console.log('[1DM] M3U8 文件已触发:', filename);
     }
 
     // ==========================================
