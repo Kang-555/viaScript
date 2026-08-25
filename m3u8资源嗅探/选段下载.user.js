@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      6.2
+// @version      6.3
 // @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
@@ -877,8 +877,9 @@
         }
 
         let startSec = Math.min(30, totalDuration);
-        let endSec = Math.min(75, totalDuration);
+        let endSec = totalDuration;
         const sliderMax = Math.ceil(totalDuration);
+        let activeSlider = 'end';
 
         const infoRow = createElement('div', {
             style: {
@@ -927,6 +928,7 @@
         }
 
         startSlider.oninput = () => {
+            activeSlider = 'start';
             let val = parseFloat(startSlider.value);
             startSec = Math.max(0, Math.min(val, endSec));
             startLabel.textContent = `起始：${formatTimeHMS(startSec)}`;
@@ -935,6 +937,7 @@
         };
 
         endSlider.oninput = () => {
+            activeSlider = 'end';
             let val = parseFloat(endSlider.value);
             endSec = Math.max(startSec, Math.min(val, sliderMax));
             endLabel.textContent = `结束：${formatTimeHMS(endSec)}`;
@@ -977,8 +980,7 @@
             }, btn.label);
 
             button.onclick = () => {
-                const isStart = document.activeElement === startSlider;
-                if (isStart) {
+                if (activeSlider === 'start') {
                     startSec = Math.max(0, Math.min(startSec + btn.delta, endSec));
                     startSlider.value = String(startSec);
                     startLabel.textContent = `起始：${formatTimeHMS(startSec)}`;
@@ -1002,7 +1004,7 @@
                 textAlign: 'center',
                 marginBottom: '12px'
             }
-        }, '💡 点击滑块聚焦后，使用快捷按钮调整时间');
+        }, '💡 拖动滑块选择范围，点击快捷按钮调整时间');
 
         function updateInfoRow() {
             infoRow.children[2].textContent = `已选：${formatTimeHMS(endSec - startSec)} `;
