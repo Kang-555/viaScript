@@ -841,9 +841,9 @@
             video.src = m3u8Url;
         }
 
-        let startSec = 30;
-        let endSec = Math.min(75, totalDuration || 1);
-        const safeTotal = totalDuration || 1;
+        let startSec = Math.min(30, totalDuration);
+        let endSec = Math.min(75, totalDuration);
+        const sliderMax = Math.ceil(totalDuration);
 
         const infoRow = createElement('div', {
             style: {
@@ -862,10 +862,9 @@
         const startSlider = createElement('input', {
             type: 'range',
             min: '0',
-            max: String(safeTotal),
-            step: '1',
-            value: String(startSec),
-            style: { width: '100%', cursor: 'pointer' }
+            max: String(sliderMax),
+            step: '0.5',
+            value: String(startSec)
         });
         startSection.appendChild(startLabel);
         startSection.appendChild(startSlider);
@@ -875,10 +874,9 @@
         const endSlider = createElement('input', {
             type: 'range',
             min: '0',
-            max: String(safeTotal),
-            step: '1',
-            value: String(endSec),
-            style: { width: '100%', cursor: 'pointer' }
+            max: String(sliderMax),
+            step: '0.5',
+            value: String(endSec)
         });
         endSection.appendChild(endLabel);
         endSection.appendChild(endSlider);
@@ -901,7 +899,7 @@
 
         endSlider.oninput = () => {
             let val = parseFloat(endSlider.value);
-            endSec = Math.max(startSec, Math.min(val, safeTotal));
+            endSec = Math.max(startSec, Math.min(val, sliderMax));
             endLabel.textContent = `结束：${formatTimeHMS(endSec)}`;
             video.currentTime = endSec;
             updateInfoRow();
@@ -910,31 +908,30 @@
         const quickBtnsContainer = createElement('div', {
             style: {
                 display: 'flex',
-                flexWrap: 'wrap',
-                gap: '8px',
-                marginBottom: '20px',
+                gap: '6px',
+                marginBottom: '12px',
                 justifyContent: 'center'
             }
         });
 
         const quickBtns = [
-            { label: '-5分钟', delta: -300 },
-            { label: '-1分钟', delta: -60 },
-            { label: '-10秒', delta: -10 },
-            { label: '+10秒', delta: 10 },
-            { label: '+1分钟', delta: 60 },
-            { label: '+5分钟', delta: 300 }
+            { label: '-5min', delta: -300 },
+            { label: '-1min', delta: -60 },
+            { label: '-10s', delta: -10 },
+            { label: '+10s', delta: 10 },
+            { label: '+1min', delta: 60 },
+            { label: '+5min', delta: 300 }
         ];
 
         quickBtns.forEach(btn => {
             const button = createElement('button', {
                 style: {
-                    padding: '6px 12px',
+                    padding: '4px 8px',
                     background: '#333',
                     color: '#fff',
                     border: '1px solid #555',
                     borderRadius: '4px',
-                    fontSize: '12px',
+                    fontSize: '11px',
                     cursor: 'pointer',
                     transition: 'background 0.2s'
                 },
@@ -950,7 +947,7 @@
                     startLabel.textContent = `起始：${formatTimeHMS(startSec)}`;
                     video.currentTime = startSec;
                 } else {
-                    endSec = Math.max(startSec, Math.min(endSec + btn.delta, safeTotal));
+                    endSec = Math.max(startSec, Math.min(endSec + btn.delta, sliderMax));
                     endSlider.value = String(endSec);
                     endLabel.textContent = `结束：${formatTimeHMS(endSec)}`;
                     video.currentTime = endSec;
