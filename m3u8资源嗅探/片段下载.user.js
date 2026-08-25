@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         1DM HLS片段裁剪
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  裁剪M3U8时间段，生成新M3U8文件，触发1DM下载（1DM自负责解密/下载/合并）
 // @author       You
 // @match        *://*/*
 // @connect      *
 // @grant        GM_xmlhttpRequest
+// @grant        GM_download
 // @run-at       document-end
 // ==/UserScript==
 
@@ -170,22 +171,31 @@
     // 生成 M3U8 并触发 1DM
     // ==========================================
     function trigger1DM(m3u8Text, filename) {
-        // 方式1：使用 data URI 格式，1DM 更容易识别
-        const base64 = btoa(unescape(encodeURIComponent(m3u8Text)));
-        const dataUri = `data:application/x-mpegurl;base64,${base64}`;
+        // 创建临时 Blob URL，让 1DM 可以嗅探到
+        const blob = new Blob([m3u8Text], { type: 'application/x-mpegurl' });
+        const tempUrl = URL.createObjectURL(blob);
 
-        // 创建下载链接
-        const a = document.createElement('a');
-        a.href = dataUri;
-        a.download = filename;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
+        console.log('[1DM] 临时 M3U8 链接:', tempUrl);
+        console.log('[1DM] 文件名:', filename);
 
-        // 清理
+        // 方式1：在新标签页打开，1DM 应该能嗅探到
+        const newTab = window.open(tempUrl, '_blank');
+
+        // 方式2：同时创建下载链接作为备选
         setTimeout(() => {
+            const a = document.createElement('a');
+            a.href = tempUrl;
+            a.download = filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
             document.body.removeChild(a);
-        }, 100);
+        }, 500);
+
+        // 清理（延迟执行）
+        setTimeout(() => {
+            URL.revokeObjectURL(tempUrl);
+        }, 10000);
 
         console.log('[1DM] M3U8 文件已触发:', filename);
     }
@@ -230,7 +240,7 @@
     function createPanel() {
         const panel = document.createElement('div');
         panel.style.cssText = `
-position:fixed;top:20px;right:20px;z-index:999999;background:rgba(0,0,0,0.92);
+position:fixed;bottom:20px;left:20px;z-index:999999;background:rgba(0,0,0,0.92);
 color:#fff;padding:14px 16px;border-radius:10px;font-family:system-ui,sans-serif;
 font-size:13px;min-width:290px;max-width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.5);
 border:1px solid #ff6d00;
