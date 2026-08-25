@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      6.4
+// @version      6.6
 // @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
@@ -772,7 +772,7 @@
                     return { index: i, rangeIndices, start: range.start, end: range.end };
                 });
 
-                btn.textContent = `并发下载 ${downloadTasks.length} 段中...`;
+                btn.textContent = `下载中`;
                 const allWriters = new Array(downloadTasks.length);
                 const progressStates = new Array(downloadTasks.length).fill(0);
                 let lastProgressUpdate = 0;
@@ -782,11 +782,13 @@
                     const rangeWriter = new VideoWriter();
                     await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => {
                         progressStates[task.index] = p;
-                        const avg = progressStates.reduce((a, b) => a + b, 0) / progressStates.length;
                         const now = Date.now();
                         if (now - lastProgressUpdate > 150) {
-                            btn.textContent = `下载中 ${avg.toFixed(1)}%`;
+                            btn.textContent = `下载中`;
                             lastProgressUpdate = now;
+                        }
+                        if (opt.onRangeProgress) {
+                            opt.onRangeProgress(task.index, p);
                         }
                     }, rangeWriter, task.rangeIndices, opt.onSegmentDone);
                     allWriters[task.index] = rangeWriter;
@@ -798,7 +800,7 @@
                 });
 
                 await Promise.all(promises);
-                btn.textContent = `✅下载完成(${downloadTasks.length}段)`;
+                btn.textContent = `✅下载完成`;
             } else {
                 // 全量下载
                 const writer = new VideoWriter();
@@ -1162,7 +1164,7 @@
                     cursor: 'pointer',
                     boxShadow: '0 2px 8px rgba(33,150,243,0.3)'
                 }
-            }, `📥 开始下载(${existingSegments.length})`)
+            }, `下载`)
         ]);
 
         mainContent.appendChild(videoWrap);
@@ -1238,6 +1240,9 @@
             this.panel = null;
             this.toggleBtn = null;
             this.listEl = null;
+            this.downloadingId = null;
+            this.downloadingBtn = null;
+            this.segmentProgress = {};
             Bus.on('video-found', (d) => this.addResource(d));
         }
 
@@ -1353,11 +1358,11 @@
             this.countEl.textContent = `${this.resources.length} 个资源`;
             if (this.resources.length === 0) {
                 this.listEl.innerHTML = `
-        < div style = "padding:30px 20px;text-align:center;color:#666" >
+                    <div style="padding:30px 20px;text-align:center;color:#666">
                         <div style="font-size:32px;margin-bottom:8px">🎬</div>
                         <div>等待捕获视频资源...</div>
                         <div style="font-size:11px;margin-top:6px;color:#555">播放视频时自动嗅探</div>
-                    </div > `;
+                    </div>`;
                 return;
             }
 
@@ -1376,6 +1381,7 @@
                     }
                 });
 
+                // 标题行：▼ m3u8  video_playlist.m3u8
                 const titleRow = createElement('div', {
                     style: {
                         padding: '10px 12px',
@@ -1386,6 +1392,15 @@
                     },
                     onclick: () => { this.openId = isOpen ? null : item.id; this.render(); }
                 });
+
+                const arrow = createElement('span', {
+                    style: {
+                        fontSize: '10px',
+                        color: '#666',
+                        transition: 'transform 0.2s',
+                        transform: isOpen ? 'rotate(90deg)' : 'none'
+                    }
+                }, isOpen ? '▼' : '▶');
 
                 const tag = createElement('span', {
                     style: {
@@ -1410,44 +1425,34 @@
                     title: item.url
                 }, getFilename(item.url));
 
-                const arrow = createElement('span', {
-                    style: {
-                        fontSize: '10px',
-                        color: '#666',
-                        transition: 'transform 0.2s',
-                        transform: isOpen ? 'rotate(90deg)' : 'none'
-                    }
-                }, isOpen ? '▼' : '▶');
-
+                titleRow.appendChild(arrow);
                 titleRow.appendChild(tag);
                 titleRow.appendChild(nameSpan);
-                titleRow.appendChild(arrow);
                 itemWrap.appendChild(titleRow);
 
+                // 展开内容
                 if (isOpen) {
                     const bodyWrap = createElement('div', {
                         style: {
-                            padding: '12px',
+                            padding: '0 12px 12px 12px',
                             background: '#0f0f0f'
                         }
                     });
 
+                    // 时间段摘要框：📋 已选 2 段 | 02:30:00
                     if (segCount > 0) {
                         const summaryBox = createElement('div', {
                             style: {
-                                background: 'rgba(76,175,80,0.1)',
-                                border: '1px solid rgba(76,175,80,0.3)',
+                                background: '#1a1a1a',
+                                border: '1px solid #333',
                                 borderRadius: '6px',
                                 padding: '8px 12px',
-                                marginBottom: '10px',
-                                display: 'flex',
-                                justifyContent: 'space-between',
-                                alignItems: 'center'
+                                marginBottom: '8px'
                             }
                         }, [
                             createElement('span', { style: { color: '#4caf50', fontSize: '11px' } },
-                                `📋 已选 ${segCount} 段 | ${formatTimeHMS(totalDur)} `),
-                            createElement('span', { style: { color: '#888', fontSize: '10px' } },
+                                `📋 已选 ${segCount} 段 | ${formatTimeHMS(totalDur)}`),
+                            createElement('span', { style: { color: '#888', fontSize: '10px', marginLeft: '8px' } },
                                 item._cutSegments.every(c => c.startIdx != null && c.endIdx != null)
                                     ? `共${item._cutSegments.reduce((s, c) => s + (c.endIdx - c.startIdx + 1), 0)} 分片`
                                     : '分片数待解析')
@@ -1455,10 +1460,12 @@
                         bodyWrap.appendChild(summaryBox);
                     }
 
+                    // 操作按钮行：[🎬选段] [复制] [下载]
                     const btnRow = createElement('div', {
                         style: {
                             display: 'flex',
-                            gap: '6px'
+                            gap: '6px',
+                            marginBottom: segCount > 0 ? '8px' : '0'
                         }
                     });
 
@@ -1512,7 +1519,11 @@
                             if (segCount > 0) e.target.style.transform = 'translateY(-1px)';
                         },
                         onmouseout: (e) => { e.target.style.transform = 'translateY(0)'; }
-                    }, segCount > 0 ? `📥 下载(${segCount}段)` : '📥 下载');
+                    }, '📥 下载');
+
+                    if (this.downloadingId === item.id && this.downloadingBtn) {
+                        dlBtn.textContent = this.downloadingBtn.textContent;
+                    }
 
                     segBtn.onclick = async () => {
                         try {
@@ -1548,16 +1559,28 @@
                             return;
                         }
                         if (!item._downloadedSegments) item._downloadedSegments = [];
+                        this.downloadingId = item.id;
+                        this.downloadingBtn = dlBtn;
+                        this.segmentProgress = {};
                         const opt = {
                             ranges: item._cutSegments.map(s => ({ start: s.startSec, end: s.endSec })),
+                            onRangeProgress: (segIdx, progress) => {
+                                this.segmentProgress[segIdx] = progress;
+                                if (this.downloadingId === item.id) {
+                                    this.render();
+                                }
+                            },
                             onSegmentDone: (segIdx) => {
                                 if (!item._downloadedSegments.includes(segIdx)) {
                                     item._downloadedSegments.push(segIdx);
-                                    this.render();
                                 }
                             }
                         };
                         await window.TaskRunner(item.url, 'm3u8', dlBtn, opt);
+                        this.downloadingId = null;
+                        this.downloadingBtn = null;
+                        this.segmentProgress = {};
+                        this.render();
                     };
 
                     btnRow.appendChild(segBtn);
@@ -1565,14 +1588,14 @@
                     btnRow.appendChild(dlBtn);
                     bodyWrap.appendChild(btnRow);
 
+                    // 已选时间段列表
                     if (segCount > 0) {
                         const segListBox = createElement('div', {
                             style: {
-                                marginTop: '10px',
                                 background: '#111',
                                 borderRadius: '6px',
                                 padding: '8px',
-                                maxHeight: '100px',
+                                maxHeight: '120px',
                                 overflowY: 'auto'
                             }
                         });
@@ -1583,12 +1606,16 @@
                                 Array.from({ length: seg.endIdx - seg.startIdx + 1 }, (_, k) => seg.startIdx + k)
                                     .every(idx => item._downloadedSegments.includes(idx));
 
+                            const progress = this.segmentProgress[i];
+                            const progressText = progress != null ? `${progress.toFixed(1)}%` : '';
+                            const showProgress = this.downloadingId === item.id && progress != null;
+
                             const segRow = createElement('div', {
                                 style: {
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '6px',
-                                    padding: '4px 6px',
+                                    padding: '6px 8px',
                                     fontSize: '11px',
                                     borderBottom: i < item._cutSegments.length - 1 ? '1px solid #222' : 'none',
                                     opacity: isDownloaded ? 0.6 : 1
@@ -1596,9 +1623,9 @@
                             }, [
                                 createElement('span', { style: { color: isDownloaded ? '#888' : '#4caf50', fontWeight: 'bold', minWidth: '20px' } }, isDownloaded ? '✅' : `${i + 1}.`),
                                 createElement('span', { style: { flex: 1, textDecoration: isDownloaded ? 'line-through' : 'none' } },
-                                    `${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)} `),
-                                createElement('span', { style: { color: '#888', fontSize: '10px' } },
-                                    `${seg.duration.toFixed(1)} s`),
+                                    `${formatTimeHMS(seg.startSec)} → ${formatTimeHMS(seg.endSec)}`),
+                                createElement('span', { style: { color: showProgress ? '#4caf50' : '#888', fontSize: '10px', minWidth: showProgress ? '36px' : 'auto', textAlign: 'right' } },
+                                    showProgress ? progressText : `${seg.duration.toFixed(1)} s`),
                                 createElement('button', {
                                     style: {
                                         background: 'none',
