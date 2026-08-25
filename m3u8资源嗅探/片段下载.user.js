@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1DM HLS片段裁剪
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  裁剪M3U8时间段，生成新M3U8文件，触发1DM下载（1DM自负责解密/下载/合并）
 // @author       You
 // @match        *://*/*
@@ -24,6 +24,27 @@
         }
         const path = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
         return path + relativeUrl;
+    }
+
+    function parseTimeInput(str) {
+        str = str.trim();
+        if (!str) return 0;
+        const parts = str.split(':').map(Number);
+        if (parts.some(isNaN)) return 0;
+        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
+        if (parts.length === 1) return parts[0];
+        return 0;
+    }
+
+    function formatTimeInput(seconds) {
+        if (!isFinite(seconds) || seconds < 0) return '0:00';
+        const s = Math.floor(seconds);
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        const pad = (n) => n.toString().padStart(2, '0');
+        return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
     }
 
     function gmRequest(url) {
@@ -228,19 +249,13 @@ border:1px solid #ff6d00;
 
 <div style="display:flex;gap:8px;margin-bottom:10px;">
   <div style="flex:1;">
-    <label style="display:block;font-size:12px;color:#aaa;margin-bottom:4px;">开始 (秒)</label>
-    <input id="seg_start" type="number" value="0" min="0" step="1" style="width:100%;box-sizing:border-box;padding:8px 10px;background:#222;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;">
+    <label style="display:block;font-size:12px;color:#aaa;margin-bottom:4px;">开始</label>
+    <input id="seg_start" type="text" value="0:00" style="width:100%;box-sizing:border-box;padding:8px 10px;background:#222;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;text-align:center;" placeholder="mm:ss 或 ss">
   </div>
   <div style="flex:1;">
-    <label style="display:block;font-size:12px;color:#aaa;margin-bottom:4px;">结束 (秒)</label>
-    <input id="seg_end" type="number" value="60" min="1" step="1" style="width:100%;box-sizing:border-box;padding:8px 10px;background:#222;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;">
+    <label style="display:block;font-size:12px;color:#aaa;margin-bottom:4px;">结束</label>
+    <input id="seg_end" type="text" value="1:00" style="width:100%;box-sizing:border-box;padding:8px 10px;background:#222;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;text-align:center;" placeholder="mm:ss 或 ss">
   </div>
-</div>
-
-<div style="display:flex;gap:6px;margin-bottom:10px;">
-  <button class="seg-preset" data-start="0" data-end="30" style="flex:1;padding:6px;background:#333;border:1px solid #555;border-radius:5px;color:#aaa;font-size:11px;cursor:pointer;">0-30s</button>
-  <button class="seg-preset" data-start="30" data-end="60" style="flex:1;padding:6px;background:#333;border:1px solid #555;border-radius:5px;color:#aaa;font-size:11px;cursor:pointer;">30-60s</button>
-  <button class="seg-preset" data-start="60" data-end="120" style="flex:1;padding:6px;background:#333;border:1px solid #555;border-radius:5px;color:#aaa;font-size:11px;cursor:pointer;">1-2min</button>
 </div>
 
 <div id="seg_status" style="margin-bottom:10px;padding:10px;background:#1a1a1a;border-radius:6px;font-size:12px;color:#888;min-height:20px;display:none;line-height:1.5;"></div>
@@ -259,20 +274,13 @@ border:1px solid #ff6d00;
         const statusEl = panel.querySelector('#seg_status');
         const btnRun = panel.querySelector('#seg_run');
 
-        panel.querySelectorAll('.seg-preset').forEach(btn => {
-            btn.onclick = () => {
-                panel.querySelector('#seg_start').value = btn.dataset.start;
-                panel.querySelector('#seg_end').value = btn.dataset.end;
-            };
-        });
-
         btnRun.onclick = async () => {
             const url = panel.querySelector('#seg_url').value.trim();
-            const startSec = Number(panel.querySelector('#seg_start').value);
-            const endSec = Number(panel.querySelector('#seg_end').value);
+            const startSec = parseTimeInput(panel.querySelector('#seg_start').value);
+            const endSec = parseTimeInput(panel.querySelector('#seg_end').value);
 
             if (!url) { alert('请填入 M3U8 地址'); return; }
-            if (endSec <= startSec) { alert('结束秒必须大于开始秒'); return; }
+            if (endSec <= startSec) { alert('结束时间必须大于开始时间'); return; }
 
             btnRun.disabled = true;
             btnRun.style.opacity = '0.6';
