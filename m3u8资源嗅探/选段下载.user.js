@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      6.3
+// @version      6.4
 // @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
@@ -807,10 +807,15 @@
                 appearance: none;
                 width: 100%;
                 height: 6px;
-                background: #555;
-                border-radius: 3px;
+                background: transparent;
                 outline: none;
                 cursor: pointer;
+            }
+            #m3u8-slider input[type="range"]::-webkit-slider-runnable-track {
+                width: 100%;
+                height: 6px;
+                background: #555;
+                border-radius: 3px;
             }
             #m3u8-slider input[type="range"]::-webkit-slider-thumb {
                 -webkit-appearance: none;
@@ -822,6 +827,14 @@
                 border-radius: 50%;
                 cursor: pointer;
                 box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+                margin-top: -5px;
+            }
+            #m3u8-slider input[type="range"]::-moz-range-track {
+                width: 100%;
+                height: 6px;
+                background: #555;
+                border-radius: 3px;
+                border: none;
             }
             #m3u8-slider input[type="range"]::-moz-range-thumb {
                 width: 16px;
