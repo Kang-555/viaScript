@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      6.0
+// @version      6.1
 // @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
@@ -841,8 +841,8 @@
             video.src = m3u8Url;
         }
 
-        let startSec = 0;
-        let endSec = Math.min(60, totalDuration || 1);
+        let startSec = 30;
+        let endSec = Math.min(75, totalDuration || 1);
         const safeTotal = totalDuration || 1;
 
         const infoRow = createElement('div', {
@@ -858,101 +858,117 @@
         ]);
 
         const startSection = createElement('div', { style: { marginBottom: '18px' } });
-        const startLabel = createElement('div', { style: { fontSize: '14px', color: '#aaa', marginBottom: '6px' } }, `起始：${formatTimeHMS(startSec)}`);
-
-        const startTrack = createElement('div', {
-            style: { width: '100%', height: '10px', background: '#333', borderRadius: '5px', position: 'relative', cursor: 'pointer' }
+        const startLabel = createElement('div', { style: { fontSize: '14px', color: '#aaa', marginBottom: '8px' } }, `起始：${formatTimeHMS(startSec)}`);
+        const startSlider = createElement('input', {
+            type: 'range',
+            min: '0',
+            max: String(safeTotal),
+            step: '1',
+            value: String(startSec),
+            style: { width: '100%', cursor: 'pointer' }
         });
-        const startFill = createElement('div', {
-            style: {
-                position: 'absolute', height: '100%', background: 'linear-gradient(90deg,#4caf50,#81c784)',
-                borderRadius: '5px', width: `${(startSec / safeTotal) * 100}%`
-            }
-        });
-        const startThumb = createElement('div', {
-            style: {
-                width: '20px', height: '20px', borderRadius: '50%', background: '#4caf50',
-                position: 'absolute', top: '-5px', marginLeft: '-10px', cursor: 'grab',
-                left: `${(startSec / safeTotal) * 100}%`,
-                boxShadow: '0 0 8px rgba(76,175,80,0.6)', transition: 'box-shadow 0.2s'
-            }
-        });
-        startTrack.appendChild(startFill);
-        startTrack.appendChild(startThumb);
         startSection.appendChild(startLabel);
-        startSection.appendChild(startTrack);
+        startSection.appendChild(startSlider);
 
         const endSection = createElement('div', { style: { marginBottom: '20px' } });
-        const endLabel = createElement('div', { style: { fontSize: '14px', color: '#aaa', marginBottom: '6px' } }, `结束：${formatTimeHMS(endSec)}`);
-        const endTrack = createElement('div', {
-            style: { width: '100%', height: '10px', background: '#333', borderRadius: '5px', position: 'relative', cursor: 'pointer' }
+        const endLabel = createElement('div', { style: { fontSize: '14px', color: '#aaa', marginBottom: '8px' } }, `结束：${formatTimeHMS(endSec)}`);
+        const endSlider = createElement('input', {
+            type: 'range',
+            min: '0',
+            max: String(safeTotal),
+            step: '1',
+            value: String(endSec),
+            style: { width: '100%', cursor: 'pointer' }
         });
-        const endFill = createElement('div', {
-            style: {
-                position: 'absolute', height: '100%', background: 'linear-gradient(90deg,#4caf50,#81c784)',
-                borderRadius: '5px', width: `${(endSec / safeTotal) * 100}% `
-            }
-        });
-        const endThumb = createElement('div', {
-            style: {
-                width: '20px', height: '20px', borderRadius: '50%', background: '#4caf50',
-                position: 'absolute', top: '-5px', marginLeft: '-10px', cursor: 'grab',
-                left: `${(endSec / safeTotal) * 100}% `,
-                boxShadow: '0 0 8px rgba(76,175,80,0.6)', transition: 'box-shadow 0.2s'
-            }
-        });
-        endTrack.appendChild(endFill);
-        endTrack.appendChild(endThumb);
         endSection.appendChild(endLabel);
-        endSection.appendChild(endTrack);
+        endSection.appendChild(endSlider);
 
-        function setupSliderInteraction(thumb, track, fill, label, setSec) {
-            let dragging = false;
-            function setPos(clientX) {
-                const rect = track.getBoundingClientRect();
-                if (rect.width === 0) return;
-                let pct = (clientX - rect.left) / rect.width;
-                pct = Math.max(0, Math.min(1, pct));
-                const sec = pct * safeTotal;
-                thumb.style.left = `${pct * 100}% `;
-                fill.style.width = `${pct * 100}% `;
-                setSec(sec);
-            }
-            thumb.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); thumb.style.boxShadow = '0 0 16px rgba(76,175,80,1)'; });
-            thumb.addEventListener('touchstart', (e) => { dragging = true; thumb.style.boxShadow = '0 0 16px rgba(76,175,80,1)'; }, { passive: true });
-            track.addEventListener('mousedown', (e) => {
-                if (e.target === thumb) return;
-                setPos(e.clientX);
-            });
-            document.addEventListener('mousemove', (e) => { if (dragging) setPos(e.clientX); });
-            document.addEventListener('touchmove', (e) => {
-                if (dragging) setPos(e.touches[0].clientX);
-            }, { passive: true });
-            const endDrag = () => {
-                dragging = false;
-                thumb.style.boxShadow = '0 0 8px rgba(76,175,80,0.6)';
-            };
-            document.addEventListener('mouseup', endDrag);
-            document.addEventListener('touchend', endDrag);
+        function updateSliderPositions() {
+            startSlider.value = String(startSec);
+            endSlider.value = String(endSec);
+            startLabel.textContent = `起始：${formatTimeHMS(startSec)}`;
+            endLabel.textContent = `结束：${formatTimeHMS(endSec)}`;
+            updateInfoRow();
         }
 
-        setupSliderInteraction(startThumb, startTrack, startFill, startLabel, (sec) => {
-            startSec = Math.min(sec, endSec);
-            startThumb.style.left = `${(startSec / safeTotal) * 100}% `;
-            startFill.style.width = `${(startSec / safeTotal) * 100}% `;
-            startLabel.textContent = `起始：${formatTimeHMS(startSec)} `;
+        startSlider.oninput = () => {
+            let val = parseFloat(startSlider.value);
+            startSec = Math.max(0, Math.min(val, endSec));
+            startLabel.textContent = `起始：${formatTimeHMS(startSec)}`;
             video.currentTime = startSec;
             updateInfoRow();
-        });
+        };
 
-        setupSliderInteraction(endThumb, endTrack, endFill, endLabel, (sec) => {
-            endSec = Math.max(sec, startSec);
-            endThumb.style.left = `${(endSec / safeTotal) * 100}% `;
-            endFill.style.width = `${(endSec / safeTotal) * 100}% `;
-            endLabel.textContent = `结束：${formatTimeHMS(endSec)} `;
+        endSlider.oninput = () => {
+            let val = parseFloat(endSlider.value);
+            endSec = Math.max(startSec, Math.min(val, safeTotal));
+            endLabel.textContent = `结束：${formatTimeHMS(endSec)}`;
             video.currentTime = endSec;
             updateInfoRow();
+        };
+
+        const quickBtnsContainer = createElement('div', {
+            style: {
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '8px',
+                marginBottom: '20px',
+                justifyContent: 'center'
+            }
         });
+
+        const quickBtns = [
+            { label: '-5分钟', delta: -300 },
+            { label: '-1分钟', delta: -60 },
+            { label: '-10秒', delta: -10 },
+            { label: '+10秒', delta: 10 },
+            { label: '+1分钟', delta: 60 },
+            { label: '+5分钟', delta: 300 }
+        ];
+
+        quickBtns.forEach(btn => {
+            const button = createElement('button', {
+                style: {
+                    padding: '6px 12px',
+                    background: '#333',
+                    color: '#fff',
+                    border: '1px solid #555',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    transition: 'background 0.2s'
+                },
+                onmouseover: (e) => { e.target.style.background = '#444'; },
+                onmouseout: (e) => { e.target.style.background = '#333'; }
+            }, btn.label);
+
+            button.onclick = () => {
+                const isStart = document.activeElement === startSlider;
+                if (isStart) {
+                    startSec = Math.max(0, Math.min(startSec + btn.delta, endSec));
+                    startSlider.value = String(startSec);
+                    startLabel.textContent = `起始：${formatTimeHMS(startSec)}`;
+                    video.currentTime = startSec;
+                } else {
+                    endSec = Math.max(startSec, Math.min(endSec + btn.delta, safeTotal));
+                    endSlider.value = String(endSec);
+                    endLabel.textContent = `结束：${formatTimeHMS(endSec)}`;
+                    video.currentTime = endSec;
+                }
+                updateInfoRow();
+            };
+
+            quickBtnsContainer.appendChild(button);
+        });
+
+        const hint = createElement('div', {
+            style: {
+                fontSize: '11px',
+                color: '#666',
+                textAlign: 'center',
+                marginBottom: '12px'
+            }
+        }, '💡 点击滑块聚焦后，使用快捷按钮调整时间');
 
         function updateInfoRow() {
             infoRow.children[2].textContent = `已选：${formatTimeHMS(endSec - startSec)} `;
@@ -1071,6 +1087,8 @@
         mainContent.appendChild(infoRow);
         mainContent.appendChild(startSection);
         mainContent.appendChild(endSection);
+        mainContent.appendChild(quickBtnsContainer);
+        mainContent.appendChild(hint);
         mainContent.appendChild(addBtn);
         mainContent.appendChild(segSection);
         segSection.appendChild(segTitle);
