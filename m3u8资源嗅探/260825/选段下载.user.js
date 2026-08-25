@@ -491,19 +491,35 @@
         constructor() {
             this.fixedBuffers = [];
             this.totalSize = 0;
+            this.chunkBlobs = [];
+            this.CHUNK_SIZE = 50 * 1024 * 1024;
         }
         addFixedBuffer(data) {
             const uint8 = data instanceof Uint8Array ? data : new Uint8Array(data);
             this.fixedBuffers.push(uint8);
             this.totalSize += uint8.length;
+            if (this.totalSize >= this.CHUNK_SIZE) {
+                this.flushChunk();
+            }
+        }
+        flushChunk() {
+            if (this.fixedBuffers.length === 0) return;
+            const chunkBlob = new Blob(this.fixedBuffers, { type: 'video/mp2t' });
+            this.chunkBlobs.push(chunkBlob);
+            this.fixedBuffers = [];
+            this.totalSize = 0;
         }
         async close(filename) {
-            if (this.fixedBuffers.length === 0) {
+            this.flushChunk();
+            if (this.chunkBlobs.length === 0) {
                 alert('分片数据为空，无法保存');
                 return;
             }
-            const blob = new Blob(this.fixedBuffers, { type: 'video/mp2t' });
-            downloadBlob(blob, filename.replace(/\.zip$/i, '.ts'));
+            const finalBlob = this.chunkBlobs.length === 1
+                ? this.chunkBlobs[0]
+                : new Blob(this.chunkBlobs, { type: 'video/mp2t' });
+            this.chunkBlobs = [];
+            downloadBlob(finalBlob, filename.replace(/\.zip$/i, '.ts'));
         }
     }
 
@@ -758,15 +774,22 @@
 
                 btn.textContent = `并发下载 ${downloadTasks.length} 段中...`;
                 const allWriters = new Array(downloadTasks.length);
+                const progressStates = new Array(downloadTasks.length).fill(0);
+                let lastProgressUpdate = 0;
 
                 // 并发下载
                 const promises = downloadTasks.map(async (task) => {
                     const rangeWriter = new VideoWriter();
                     await downloadM3u8BySegments(parseRet.segments, keyCache, (p, txt) => {
-                        btn.textContent = `段${task.index + 1}: ${txt}`;
+                        progressStates[task.index] = p;
+                        const avg = progressStates.reduce((a, b) => a + b, 0) / progressStates.length;
+                        const now = Date.now();
+                        if (now - lastProgressUpdate > 150) {
+                            btn.textContent = `下载中 ${avg.toFixed(1)}%`;
+                            lastProgressUpdate = now;
+                        }
                     }, rangeWriter, task.rangeIndices, opt.onSegmentDone);
                     allWriters[task.index] = rangeWriter;
-                    // 该段下载完，立即触发保存
                     const segFilename = downloadTasks.length === 1
                         ? filename.replace(/\.zip$/i, '.ts')
                         : filename.replace(/\.zip$/i, '').replace(/\.[^.]+$/, '') + `_part${task.index + 1}.ts`;
