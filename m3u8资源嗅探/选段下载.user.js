@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8可视化拖拽选段下载
 // @namespace    http://tampermonkey.net/
-// @version      6.1
+// @version      6.2
 // @description  全新UI设计；网页m3u8嗅探、全屏选段工作台、可视化拖拽选段、AES-128解密、分片拼接TS、手机电脑通用
 // @author       You
 // @license      MIT
@@ -793,12 +793,47 @@
         const totalDuration = parseRet.totalDuration;
 
         const overlay = createElement('div', {
+            id: 'm3u8-slider',
             style: {
                 position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
                 background: '#0a0a0a', zIndex: '999999', overflowY: 'auto',
                 display: 'flex', flexDirection: 'column'
             }
         });
+
+        const sliderStyle = createElement('style', {}, `
+            #m3u8-slider input[type="range"] {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 100%;
+                height: 6px;
+                background: #555;
+                border-radius: 3px;
+                outline: none;
+                cursor: pointer;
+            }
+            #m3u8-slider input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 16px;
+                height: 16px;
+                background: #000;
+                border: 2px solid #fff;
+                border-radius: 50%;
+                cursor: pointer;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+            }
+            #m3u8-slider input[type="range"]::-moz-range-thumb {
+                width: 16px;
+                height: 16px;
+                background: #000;
+                border: 2px solid #fff;
+                border-radius: 50%;
+                cursor: pointer;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+            }
+        `);
+        overlay.appendChild(sliderStyle);
 
         const header = createElement('div', {
             style: {
@@ -864,7 +899,8 @@
             min: '0',
             max: String(sliderMax),
             step: '0.5',
-            value: String(startSec)
+            value: String(startSec),
+            style: { width: '100%' }
         });
         startSection.appendChild(startLabel);
         startSection.appendChild(startSlider);
@@ -876,7 +912,8 @@
             min: '0',
             max: String(sliderMax),
             step: '0.5',
-            value: String(endSec)
+            value: String(endSec),
+            style: { width: '100%' }
         });
         endSection.appendChild(endLabel);
         endSection.appendChild(endSlider);
