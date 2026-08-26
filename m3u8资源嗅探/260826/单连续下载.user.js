@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       单连续下载
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -93,19 +93,34 @@
             return h * 3600 + m * 60 + sec;
         },
 
-        request: (url, isBinary = false, onProgress = null) => {
+        request: (url, isBinary = false, onProgress = null, cancelCheck = null) => {
             return new Promise((resolve, reject) => {
                 let lastLoaded = 0;
                 let lastTime = Date.now();
                 let speed = 0;
-                const xhr = GM_xmlhttpRequest({
+                let cancelled = false;
+                let xhr = null;
+                let cancelTimer = null;
+
+                if (cancelCheck) {
+                    cancelTimer = setInterval(() => {
+                        if (cancelCheck()) {
+                            clearInterval(cancelTimer);
+                            cancelled = true;
+                            if (xhr) { try { xhr.abort(); } catch (e) { } }
+                            reject(new Error('Cancelled'));
+                        }
+                    }, 100);
+                }
+
+                xhr = GM_xmlhttpRequest({
                     method: 'GET',
                     url: url,
                     responseType: isBinary ? 'arraybuffer' : 'text',
                     headers: { 'Referer': location.href, 'Origin': location.origin },
                     timeout: 60000,
                     onprogress: (evt) => {
-                        if (!onProgress) return;
+                        if (!onProgress || cancelled) return;
                         const now = Date.now();
                         const delta = now - lastTime;
                         if (delta >= 200) {
@@ -117,6 +132,8 @@
                         onProgress(evt.loaded, evt.total, speed);
                     },
                     onload: (res) => {
+                        if (cancelled) return;
+                        if (cancelTimer) { clearInterval(cancelTimer); cancelTimer = null; }
                         if (res.status >= 200 && res.status < 300) {
                             if (onProgress && res.response && typeof res.response === 'object' && res.response.byteLength) {
                                 try { onProgress(res.response.byteLength, res.response.byteLength, speed); } catch (e) { }
@@ -124,8 +141,15 @@
                             resolve(res.response);
                         } else reject(new Error(`HTTP Error ${res.status}`));
                     },
-                    onerror: (err) => reject(err),
-                    ontimeout: () => reject(new Error('Timeout'))
+                    onerror: (err) => {
+                        if (cancelled) return;
+                        if (cancelTimer) { clearInterval(cancelTimer); cancelTimer = null; }
+                        reject(err);
+                    },
+                    ontimeout: () => {
+                        if (cancelTimer) { clearInterval(cancelTimer); cancelTimer = null; }
+                        reject(new Error('Timeout'));
+                    }
                 });
             });
         },
@@ -472,7 +496,7 @@
         return { startIdx, endIdx };
     };
 
-    const downloadM3u8BySegments = async (segments, keyCache, onProgress, writer, startIdx = null, endIdx = null) => {
+    const downloadM3u8BySegments = async (segments, keyCache, onProgress, writer, startIdx = null, endIdx = null, cancelCheck = null) => {
         let workSegments = [...segments];
         if (Number.isInteger(startIdx) && Number.isInteger(endIdx)) {
             workSegments = workSegments.slice(startIdx, endIdx + 1);
@@ -508,6 +532,7 @@
 
         const worker = async () => {
             while (nextIndex < workSegments.length) {
+                if (cancelCheck && cancelCheck()) break;
                 const index = nextIndex++;
                 const segment = workSegments[index];
                 let rawData = null;
@@ -515,6 +540,7 @@
                 let lastError = null;
 
                 while (!rawData && retries >= 0) {
+                    if (cancelCheck && cancelCheck()) break;
                     try {
                         let segmentLoaded = 0;
                         const data = await Utils.request(segment.url, true, (loaded, total, speed) => {
@@ -523,7 +549,7 @@
                                 segmentLoaded = loaded;
                                 totalBytes += delta;
                             }
-                        });
+                        }, cancelCheck);
                         if (segment.key) {
                             const key = keyCache.get(segment.key);
                             if (!key) throw new Error(`密钥未找到: ${segment.key}`);
@@ -569,11 +595,14 @@
         const threads = Array(Math.min(Config.maxThreads, workSegments.length)).fill(null).map(() => worker());
         await Promise.all(threads);
 
+        if (cancelCheck && cancelCheck()) return;
+
         updateProgress(true);
         console.log(`[downloadM3u8BySegments] 下载完成: 成功${workSegments.length - failCount}个，失败${failCount}个，总字节${totalBytes}`);
 
         const segResults = [];
         for (let i = 0; i < results.length; i++) {
+            if (cancelCheck && cancelCheck()) break;
             if (results[i] && results[i].length > 0) {
                 await writer.addFile('', results[i]);
                 segResults.push({ dur: workSegments[i].dur, seq: workSegments[i].seq });
@@ -588,7 +617,7 @@
         return segResults;
     };
 
-    const downloadMp4 = async (url, onProgress, writer) => {
+    const downloadMp4 = async (url, onProgress, writer, cancelCheck = null) => {
         if (Config.isMobile) {
             try {
                 if (confirm(`${Utils.getFilename(url)}\n是否调用浏览器自带下载器？\n(省流量、不闪退、速度快)`)) {
@@ -622,7 +651,7 @@
             const etaSec = speed > 0 && total > 0 ? (total - loaded) / speed : 0;
             const text = `${percent.toFixed(1)}% | ${Utils.formatBytes(loaded)}${total > 0 ? '/' + Utils.formatBytes(total) : ''} | ${Utils.formatBytes(speed)}/s${etaSec > 0 ? ' | ETA ' + Utils.formatTime(etaSec) : ''}`;
             onProgress(percent, text, { totalBytes: loaded, speed });
-        });
+        }, cancelCheck);
         const size = data ? (data.byteLength || data.length || 0) : 0;
         if (totalBytes === 0) totalBytes = size;
         const elapsed = (Date.now() - taskStartTs) / 1000;
@@ -636,7 +665,7 @@
     // ==========================================
     // 6.5 通用下载任务入口
     // ==========================================
-    const TaskRunner = async (url, type, onProgress, opt = {}) => {
+    const TaskRunner = async (url, type, onProgress, opt = {}, cancelCheck = null) => {
         const safeName = (document.title || 'video').replace(/[\\/:*?"<>|]/g, ' ').trim();
         let filename = type === 'm3u8' ? safeName + '.ts' : safeName + '.mp4';
         console.log('[TaskRunner] 开始:', { url, type, opt });
@@ -645,6 +674,7 @@
         try {
             if (type === 'm3u8') {
                 onProgress(0, '解析m3u8...', null);
+                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
                 const parseResult = await parseM3u8(url);
                 const { segments, timeList } = parseResult;
                 console.log('[TaskRunner] 解析完成, 分片数:', segments.length);
@@ -663,28 +693,35 @@
                 const uniqueKeys = [...new Set(segments.filter(s => s.key).map(s => s.key))];
                 if (uniqueKeys.length > 0) {
                     onProgress(0, '获取加密密钥...', null);
+                    if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
                     for (const keyUrl of uniqueKeys) {
                         const keyData = await Utils.request(keyUrl, true);
                         keyCache.set(keyUrl, new Uint8Array(keyData));
                     }
                 }
                 console.log('[TaskRunner] 开始下载分片');
-                await downloadM3u8BySegments(segments, keyCache, onProgress, writer, startIdx, endIdx);
+                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
+                await downloadM3u8BySegments(segments, keyCache, onProgress, writer, startIdx, endIdx, cancelCheck);
+                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
                 console.log('[TaskRunner] 分片下载完成');
                 onProgress(100, '保存中...', null);
                 console.log('[TaskRunner] 生成TS文件:', filename);
+                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
                 await writer.close(filename);
                 console.log('[TaskRunner] TS文件生成完成');
                 onProgress(100, '下载完成', null);
             } else {
                 onProgress(0, '下载中...', null);
-                const dlResult = await downloadMp4(url, onProgress, writer);
+                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
+                const dlResult = await downloadMp4(url, onProgress, writer, cancelCheck);
+                if (dlResult.cancelled) { writer.clear(); return { cancelled: true }; }
                 if (dlResult.nativeDl) {
                     console.log('[TaskRunner] 原生下载已触发，跳过打包');
                     return { nativeDl: true };
                 }
                 onProgress(100, '保存中...', null);
                 console.log('[TaskRunner] 生成文件:', filename);
+                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
                 await writer.close(filename);
                 console.log('[TaskRunner] 文件生成完成');
                 onProgress(100, '下载完成', null);
@@ -692,6 +729,10 @@
             return { nativeDl: false };
         } catch (error) {
             console.error('[TaskRunner] 错误:', error);
+            writer.clear();
+            if (error.message === 'Cancelled') {
+                return { cancelled: true };
+            }
             throw error;
         }
     };
@@ -714,6 +755,9 @@
                 error: null
             };
             this.inited = false;
+            this._cancelled = false;
+            this._writer = null;
+            this._currentId = 0;
             Bus.on('video-found', (data) => {
                 this.addResource(data);
             });
@@ -726,7 +770,7 @@
 
             this.host = Utils.createElement('div', {
                 id: Config.uiId,
-                style: { position: 'fixed', bottom: 'calc(65px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
+                style: { position: 'fixed', bottom: 'calc(3px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
             });
 
             try {
@@ -1009,8 +1053,8 @@
                 const segRadio = segModeRow.querySelector('#modeSeg');
                 const handleModeSwitch = () => {
                     const isTime = timeRadio.checked;
-                    timeModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = !isTime);
-                    segModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = isTime);
+                    timeModeRow.querySelectorAll('input[type="text"]').forEach(i => i.disabled = !isTime);
+                    segModeRow.querySelectorAll('input[type="text"]').forEach(i => i.disabled = isTime);
                 };
                 timeRadio.onclick = handleModeSwitch;
                 segRadio.onclick = handleModeSwitch;
@@ -1114,6 +1158,11 @@
         clearDownload() {
             if (this.downloadState.status === 'downloading') {
                 if (!confirm('确定要终止当前下载吗？')) return;
+                this._cancelled = true;
+                if (this._writer) {
+                    this._writer.clear();
+                    this._writer = null;
+                }
             }
             this.downloadState = {
                 status: 'idle',
@@ -1129,20 +1178,28 @@
             const opt = item.type === 'm3u8' ? this.collectDownloadOpt(item) : {};
             console.log('[UI.runDownload] target:', item.url, 'opt:', opt);
 
+            this._cancelled = false;
+            this._writer = null;
+            this._currentId++;
+            const myId = this._currentId;
             this.downloadState.status = 'downloading';
             btn.disabled = true;
-            btn.textContent = '解析中...';
+            btn.textContent = '下载中...';
+
+            const cancelCheck = () => this._cancelled || this._currentId !== myId;
 
             const onProgress = (percent, text, data) => {
                 this.downloadState.progressText = text;
-                btn.textContent = text.length > 20 ? text.substring(0, 20) + '...' : text;
                 const infoEl = this.root.querySelector('#downloadInfo');
                 if (infoEl) infoEl.textContent = text;
             };
 
             try {
-                const result = await TaskRunner(item.url, item.type, onProgress, opt);
-                if (result.nativeDl) {
+                const result = await TaskRunner(item.url, item.type, onProgress, opt, cancelCheck);
+                if (result && result.cancelled) {
+                    this.downloadState.status = 'idle';
+                    this.downloadState.progressText = '';
+                } else if (result.nativeDl) {
                     this.downloadState.status = 'done';
                     this.downloadState.progressText = '原生下载已启动';
                 } else {
@@ -1151,9 +1208,14 @@
                 }
             } catch (error) {
                 console.error('[UI.runDownload] 失败:', error);
-                this.downloadState.status = 'error';
-                this.downloadState.error = error.message;
-                alert(`下载错误: ${error.message || error}`);
+                if (this._cancelled || this._currentId !== myId) {
+                    this.downloadState.status = 'idle';
+                    this.downloadState.progressText = '';
+                } else {
+                    this.downloadState.status = 'error';
+                    this.downloadState.error = error.message;
+                    alert(`下载错误: ${error.message || error}`);
+                }
             } finally {
                 const currentBtn = this.root.querySelector('.btn-download');
                 if (currentBtn) {
