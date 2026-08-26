@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       单连续下载
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -726,7 +726,7 @@
 
             this.host = Utils.createElement('div', {
                 id: Config.uiId,
-                style: { position: 'fixed', bottom: 'calc(80px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
+                style: { position: 'fixed', bottom: 'calc(67px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
             });
 
             try {
@@ -1005,15 +1005,15 @@
                 ]);
                 body.appendChild(segModeRow);
 
-                // 模式切换
-                timeModeRow.querySelector('#modeTime').onchange = () => {
-                    segModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = true);
-                    timeModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = false);
+                const timeRadio = timeModeRow.querySelector('#modeTime');
+                const segRadio = segModeRow.querySelector('#modeSeg');
+                const handleModeSwitch = () => {
+                    const isTime = timeRadio.checked;
+                    timeModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = !isTime);
+                    segModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = isTime);
                 };
-                segModeRow.querySelector('#modeSeg').onchange = () => {
-                    timeModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = true);
-                    segModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = false);
-                };
+                timeRadio.onclick = handleModeSwitch;
+                segRadio.onclick = handleModeSwitch;
             }
 
             // 按钮行
