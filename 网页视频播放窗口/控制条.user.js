@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         视频悬浮精确控制
+// @name         视频控制条
 // @namespace    http://tampermonkey.net/
 // @version      2.0
 // @description  智能识别主视频自动播放，两行紧凑控制条支持精确跳转、长按快进、倍速控制
@@ -196,13 +196,9 @@
 
     const dragHandle = document.createElement("div");
     dragHandle.style.cssText = `
-      display:flex;align-items:center;justify-content:center;
-      padding:4px 0;background:rgba(255,255,255,0.05);
-      cursor:grab;border-bottom:1px solid rgba(255,255,255,0.08);
-      font-size:12px;color:rgba(255,255,255,0.35);
-      letter-spacing:6px;user-select:none;
+      position:absolute;top:0;left:0;width:7px;height:7px;
+      background:transparent;cursor:grab;user-select:none;z-index:2;
     `;
-    dragHandle.textContent = '⋮⋮';
 
     const controllerInner = document.createElement("div");
     controllerInner.style.cssText = `padding:12px;display:flex;flex-direction:column;gap:${CONFIG.gap};`;
@@ -300,10 +296,12 @@
     controlWrap.style.cssText = `display:flex;gap:${CONFIG.gap};width:100%;align-items:center;`;
 
     const jumpButtons = [
-      { text: "« 1min", seconds: -60 },
-      { text: "« 10s", seconds: -10 },
-      { text: "10s »", seconds: 10 },
-      { text: "1min »", seconds: 60 }
+      { text: "-5m", seconds: -300 },
+      { text: "-1m", seconds: -60 },
+      { text: "-10s", seconds: -10 },
+      { text: "+10s", seconds: 10 },
+      { text: "+1m", seconds: 60 },
+      { text: "+5m", seconds: 300 }
     ];
     jumpButtons.forEach(item => controlWrap.appendChild(createLargeButton(item.text, item.seconds)));
 
@@ -568,8 +566,8 @@
     const btn = document.createElement("button");
     btn.textContent = text;
     btn.style.cssText = `
-      flex:1;padding:11px 2px;border:none;border-radius:10px;background:${CONFIG.accentColor};
-      color:${CONFIG.textColor};font-weight:bold;font-size:13px;white-space:nowrap;transition:0.16s;
+      flex:1;padding:8px 1px;border:none;border-radius:8px;background:${CONFIG.accentColor};
+      color:${CONFIG.textColor};font-weight:bold;font-size:12px;white-space:nowrap;transition:0.16s;
       -webkit-user-select:none;user-select:none;
     `;
 
