@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       单连续下载
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.1.0
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -619,9 +619,9 @@
         return segResults;
     };
 
-    const downloadMp4 = async (url, onProgress, writer, cancelCheck = null) => {
+    const downloadMp4 = async (url, saveName, onProgress, writer, cancelCheck = null) => {
         console.log('[downloadMp4] GM_download 原生下载:', url);
-        const fname = Utils.getFilename(url).replace(/[\\/:*?"<>|]/g, '_');
+        const fname = (saveName || Utils.getFilename(url)).replace(/[\\/:*?"<>|]/g, '_');
         onProgress(0, '已提交浏览器下载', null);
         return new Promise((resolve, reject) => {
             const jobId = GM_download({
@@ -633,6 +633,35 @@
                 },
                 onerror: (err) => {
                     console.error('[downloadMp4] 下载错误:', err);
+                    reject(new Error(err.error || '下载失败'));
+                }
+            });
+            if (jobId && typeof jobId === 'number') {
+                const checkCancel = setInterval(() => {
+                    if (cancelCheck && cancelCheck()) {
+                        clearInterval(checkCancel);
+                        try { GM_abort_download(jobId); } catch (e) { }
+                        reject(new Error('Cancelled'));
+                    }
+                }, 200);
+            }
+        });
+    };
+
+    const downloadM3u8Native = async (url, safeName, onProgress, cancelCheck = null) => {
+        console.log('[downloadM3u8Native] GM_download m3u8链接:', url);
+        const fname = (safeName || 'video').replace(/[\\/:*?"<>|]/g, '_') + '.m3u8';
+        onProgress(0, '已提交浏览器下载', null);
+        return new Promise((resolve, reject) => {
+            const jobId = GM_download({
+                url: url,
+                name: fname,
+                onload: () => {
+                    console.log('[downloadM3u8Native] 下载完成');
+                    resolve({ nativeDl: true });
+                },
+                onerror: (err) => {
+                    console.error('[downloadM3u8Native] 下载错误:', err);
                     reject(new Error(err.error || '下载失败'));
                 }
             });
@@ -675,6 +704,17 @@
                     console.log('[TaskRunner] 时间换算分片:', startIdx, '-', endIdx);
                 }
 
+                const isFullRange = (startIdx === null && endIdx === null)
+                    || (startIdx === 0 && endIdx >= segments.length - 1);
+
+                if (isFullRange) {
+                    console.log('[TaskRunner] 全量下载，GM_download m3u8链接');
+                    writer.clear();
+                    return await downloadM3u8Native(url, filename, onProgress, cancelCheck);
+                }
+
+                console.log('[TaskRunner] 分片下载模式:', startIdx, '-', endIdx);
+
                 const keyCache = new Map();
                 const uniqueKeys = [...new Set(segments.filter(s => s.key).map(s => s.key))];
                 if (uniqueKeys.length > 0) {
@@ -699,7 +739,7 @@
             } else {
                 onProgress(0, '下载中...', null);
                 if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                const dlResult = await downloadMp4(url, onProgress, writer, cancelCheck);
+                const dlResult = await downloadMp4(url, filename, onProgress, writer, cancelCheck);
                 if (dlResult.cancelled) { writer.clear(); return { cancelled: true }; }
                 if (dlResult.nativeDl) {
                     console.log('[TaskRunner] GM_download 已触发，跳过打包');
@@ -776,11 +816,11 @@
                 }
                 .head {
                     padding: 6px 8px; background: rgba(255,255,255,0.08);
-                    display: flex; align-items: center; justify-content: space-between;
+                    display: flex; align-items: flex-start; justify-content: space-between;
                     border-bottom: 1px solid rgba(255,255,255,0.1);
                     font-weight: bold; color: ${Config.colors.primary};
                 }
-                .head-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                .head-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: normal; word-break: break-all; }
                 .head-btn {
                     background: transparent; border: 1px solid ${Config.colors.primary};
                     color: ${Config.colors.primary}; padding: 2px 6px; border-radius: 3px;
@@ -831,11 +871,13 @@
                 }
                 .filename-edit {
                     cursor: pointer; border-bottom: 1px dashed #aaa;
+                    flex: 1; white-space: normal; word-break: break-all; overflow: hidden;
                 }
                 .filename-edit:hover { color: ${Config.colors.primary}; }
                 .filename-input {
                     flex: 1; padding: 2px 4px; border: 1px solid ${Config.colors.primary};
                     border-radius: 3px; background: #0f3460; color: #fff; font-size: 11px;
+                    resize: none; min-height: 18px; max-height: 60px;
                 }
                 .empty-tip { padding: 16px; text-align: center; color: #666; }
                 .status-bar {
@@ -984,7 +1026,6 @@
             if (!item) return;
 
             const head = Utils.createElement('div', { class: 'head' }, [
-                Utils.createElement('span', { class: 'head-title' }, '下载：'),
                 this.renderFileName(item),
                 Utils.createElement('button', {
                     class: 'head-btn',
@@ -1079,16 +1120,26 @@
         }
 
         startEditFileName(span, item) {
-            const input = Utils.createElement('input', {
-                class: 'filename-input',
-                type: 'text',
-                value: span.textContent
-            });
+            const input = document.createElement('textarea');
+            input.className = 'filename-input';
+            input.value = span.textContent;
+            input.rows = 1;
             input.onblur = () => this.finishEditFileName(input, span, item);
-            input.onkeydown = (e) => { if (e.key === 'Enter') input.blur(); };
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    input.blur();
+                }
+            };
+            input.addEventListener('input', () => {
+                input.style.height = 'auto';
+                input.style.height = input.scrollHeight + 'px';
+            });
             span.replaceWith(input);
             input.focus();
             input.select();
+            input.style.height = 'auto';
+            input.style.height = input.scrollHeight + 'px';
         }
 
         finishEditFileName(input, span, item) {
