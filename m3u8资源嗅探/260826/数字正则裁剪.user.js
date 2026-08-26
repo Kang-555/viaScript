@@ -407,7 +407,6 @@
         panel = document.createElement('div');
         panel.className = 'm3u8-panel';
         panel.innerHTML = `
-<div class="m3u8-header">🎬 M3U8正则裁剪</div>
 
 <div class="m3u8-tabs">
   <button class="tab-btn active" data-tab="link">🔗 自动嗅探</button>
