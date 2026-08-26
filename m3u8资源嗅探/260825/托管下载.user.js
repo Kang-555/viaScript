@@ -1,23 +1,18 @@
 // ==UserScript==
-// @name         1DM HLS片段裁剪（Blob替换版）
+// @name         1DM HLS片段裁剪（导出文件版）
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  裁剪M3U8后替换video.src，Via嗅探到的就是裁剪后的内容
+// @version      5.1
+// @description  裁剪M3U8时间段，导出为本地文件，1DM打开本地文件下载指定片段
 // @author       You
 // @match        *://*/*
 // @connect      *
 // @grant        GM_xmlhttpRequest
+// @grant        GM_download
 // @run-at       document-end
 // ==/UserScript==
 
 (function () {
     'use strict';
-
-    // ==========================================
-    // 全局状态
-    // ==========================================
-    let croppedM3U8BlobUrl = null;  // 裁剪后的 Blob URL
-    let originalVideoSrc = null;    // 原始 video src
 
     // ==========================================
     // 工具函数
@@ -71,9 +66,9 @@
     function parseM3u8(m3u8Text, baseUrl) {
         const lines = m3u8Text.split(/\r?\n/);
         const segments = [];
-        const globalTags = [];       // 全局标签（#EXTM3U, #EXT-X-VERSION 等）
-        const keyTags = [];          // #EXT-X-KEY 标签
-        const mapTags = [];          // #EXT-X-MAP 初始化片段
+        const globalTags = [];
+        const keyTags = [];
+        const mapTags = [];
         let targetDuration = null;
         let mediaSequence = 0;
         let currentInf = 0;
@@ -192,7 +187,7 @@
             output.push(mapTag);
         }
 
-        // 加密密钥（必须保留）
+        // 加密密钥（必须保留，URI 已是绝对路径）
         for (const keyTag of keyTags) {
             output.push(keyTag);
         }
@@ -221,9 +216,9 @@
     }
 
     // ==========================================
-    // 主流程：裁剪 + 替换 video.src
+    // 主流程：裁剪 + 导出文件
     // ==========================================
-    async function cropAndReplace(m3u8Url, startSec, endSec, onStatus) {
+    async function cropAndExport(m3u8Url, startSec, endSec, onStatus) {
         onStatus('拉取原始 M3U8...');
 
         const m3u8Text = await gmRequest(m3u8Url);
@@ -251,43 +246,31 @@
         // 生成裁剪后的 M3U8
         const croppedM3U8 = generateCroppedM3U8(parsed, startIdx, endIdx);
 
-        // 创建 Blob URL
-        const blob = new Blob([croppedM3U8], { type: 'application/x-mpegurl' });
-        const blobUrl = URL.createObjectURL(blob);
-
-        // 找到 video 元素并替换 src
-        const videos = document.querySelectorAll('video');
-        let replaced = false;
-        for (const video of videos) {
-            const src = video.currentSrc || video.src;
-            if (src && (src.includes('.m3u8') || src.includes(m3u8Url.split('?')[0]))) {
-                originalVideoSrc = video.src || video.currentSrc;
-                video.pause();
-                video.src = blobUrl;
-                video.load();
-                replaced = true;
-                console.log('[1DM] 已替换 video.src 为裁剪后的 Blob URL');
-                break;
-            }
+        // 复制到剪贴板（最可靠的方式）
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(croppedM3U8);
+            onStatus('✅ 已复制到剪贴板，请粘贴到文本编辑器保存为 .m3u8 文件');
+        } else {
+            // 备用：创建 textarea 复制
+            const textarea = document.createElement('textarea');
+            textarea.value = croppedM3U8;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            onStatus('✅ 已复制到剪贴板');
         }
 
-        if (!replaced) {
-            throw new Error('未找到匹配的 video 元素');
-        }
+        const filename = `cut_${Math.round(actualStart)}s-${Math.round(actualEnd)}s.m3u8`;
 
-        onStatus('✅ 已替换 video.src，Via 嗅探到的将是裁剪后的内容');
-        console.log('[1DM] 裁剪后 M3U8 内容:\n', croppedM3U8);
-
-        // 提示用户操作
-        alert(
-            `✅ 裁剪完成！\n\n` +
-            `裁剪分片: ${startIdx}-${endIdx} (${segCount}个)\n` +
-            `时间段: ${actualStart.toFixed(1)}s ~ ${actualEnd.toFixed(1)}s\n\n` +
-            `现在请：\n` +
-            `1. 打开 Via 浏览器的资源嗅探功能\n` +
-            `2. 找到 M3U8 链接（现在是裁剪后的）\n` +
-            `3. 点击下载 → 1DM 将只下载指定时间段`
-        );
+        // 非阻塞提示
+        setTimeout(() => {
+            statusEl.style.display = 'block';
+            statusEl.style.color = '#4caf50';
+            statusEl.innerHTML = `✅ 裁剪完成！<br>分片: ${startIdx}-${endIdx} (${segCount}个)<br>时间段: ${actualStart.toFixed(1)}s ~ ${actualEnd.toFixed(1)}s<br><br>请：<br>1. 粘贴到文本编辑器<br>2. 保存为 ${filename}<br>3. 用 1DM 打开该文件`;
+        }, 500);
     }
 
     // ==========================================
@@ -305,7 +288,7 @@ border:1px solid #ff6d00;
         panel.innerHTML = `
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
   <div style="width:8px;height:8px;background:#ff6d00;border-radius:50%;animation:pulse 1.5s infinite;"></div>
-  <b style="font-size:14px;color:#ff6d00;">1DM HLS 片段裁剪（劫持版）</b>
+  <b style="font-size:14px;color:#ff6d00;">1DM HLS 片段裁剪</b>
 </div>
 
 <div style="margin-bottom:10px;">
@@ -327,15 +310,11 @@ border:1px solid #ff6d00;
 <div id="seg_status" style="margin-bottom:10px;padding:10px;background:#1a1a1a;border-radius:6px;font-size:12px;color:#888;min-height:20px;display:none;line-height:1.5;"></div>
 
 <button id="seg_run" style="width:100%;padding:10px;background:linear-gradient(135deg,#ff6d00,#e65100);border:none;border-radius:6px;color:#000;font-weight:bold;font-size:13px;cursor:pointer;">
-✂️ 裁剪 M3U8 → 替换 video.src
-</button>
-
-<button id="seg_restore" style="width:100%;padding:8px;margin-top:6px;background:#333;border:1px solid #555;border-radius:6px;color:#aaa;font-size:12px;cursor:pointer;display:none;">
-↩️ 恢复原始 video.src
+✂️ 裁剪 M3U8 → 导出文件
 </button>
 
 <div style="font-size:11px;color:#666;margin-top:8px;text-align:center;">
-  Blob 替换模式 · Via 嗅探到的就是裁剪后的内容
+  导出本地文件 · 1DM 打开文件下载指定片段
 </div>
 `;
 
@@ -343,7 +322,6 @@ border:1px solid #ff6d00;
 
         const statusEl = panel.querySelector('#seg_status');
         const btnRun = panel.querySelector('#seg_run');
-        const btnRestore = panel.querySelector('#seg_restore');
 
         btnRun.onclick = async () => {
             const url = panel.querySelector('#seg_url').value.trim();
@@ -362,11 +340,10 @@ border:1px solid #ff6d00;
             statusEl.textContent = '初始化...';
 
             try {
-                await cropAndReplace(url, startSec, endSec, (text) => {
+                await cropAndExport(url, startSec, endSec, (text) => {
                     statusEl.style.color = text.includes('✅') ? '#4caf50' : (text.includes('❌') ? '#e74c3c' : '#aaa');
                     statusEl.textContent = text;
                 });
-                btnRestore.style.display = 'block';
             } catch (e) {
                 console.error(e);
                 statusEl.style.color = '#e74c3c';
@@ -375,32 +352,8 @@ border:1px solid #ff6d00;
             } finally {
                 btnRun.disabled = false;
                 btnRun.style.opacity = '1';
-                btnRun.textContent = '✂️ 裁剪 M3U8 → 替换 video.src';
-            }
-        };
-
-        btnRestore.onclick = () => {
-            if (originalVideoSrc) {
-                const videos = document.querySelectorAll('video');
-                for (const video of videos) {
-                    if (video.src && video.src.startsWith('blob:')) {
-                        video.pause();
-                        video.src = originalVideoSrc;
-                        video.load();
-                        console.log('[1DM] 已恢复原始 video.src');
-                        break;
-                    }
-                }
-                if (croppedM3U8BlobUrl) {
-                    URL.revokeObjectURL(croppedM3U8BlobUrl);
-                    croppedM3U8BlobUrl = null;
-                }
-                originalVideoSrc = null;
-                btnRestore.style.display = 'none';
-                statusEl.style.display = 'block';
-                statusEl.style.color = '#ff9800';
-                statusEl.textContent = '↩️ 已恢复原始 video.src';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
+                btnRun.textContent = '✂️ 裁剪 M3U8 → 导出文件';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
             }
         };
     }

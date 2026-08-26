@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         m3u8下2
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -84,11 +84,13 @@
         },
 
         parseTimeInput: (str) => {
-            if (!str || str.length !== 6) return 0;
-            const h = parseInt(str.substring(0, 2)) || 0;
-            const m = parseInt(str.substring(2, 4)) || 0;
-            const s = parseInt(str.substring(4, 6)) || 0;
-            return h * 3600 + m * 60 + s;
+            if (!str) return 0;
+            const s = String(str).padStart(6, '0');
+            if (s.length !== 6) return 0;
+            const h = parseInt(s.substring(0, 2)) || 0;
+            const m = parseInt(s.substring(2, 4)) || 0;
+            const sec = parseInt(s.substring(4, 6)) || 0;
+            return h * 3600 + m * 60 + sec;
         },
 
         request: (url, isBinary = false, onProgress = null, signal = null) => {
@@ -942,9 +944,9 @@
                 const timeModeRow = Utils.createElement('div', { class: 'mode-row' }, [
                     Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'time', id: 'modeTime', checked: 'true' }),
                     Utils.createElement('label', { for: 'modeTime' }, '时间'),
-                    Utils.createElement('input', { id: 'timeStart', type: 'text', value: timeStartVal, placeholder: '000000', style: 'width: 60px;' }),
+                    Utils.createElement('input', { id: 'timeStart', type: 'number', min: '0', max: '235959', value: timeStartVal, placeholder: '000000', style: 'width: 70px;' }),
                     Utils.createElement('span', { style: 'color: #aaa;' }, '-'),
-                    Utils.createElement('input', { id: 'timeEnd', type: 'text', value: timeEndVal, placeholder: '000000', style: 'width: 60px;' })
+                    Utils.createElement('input', { id: 'timeEnd', type: 'number', min: '0', max: '235959', value: timeEndVal, placeholder: '000000', style: 'width: 70px;' })
                 ]);
                 body.appendChild(timeModeRow);
 
@@ -960,10 +962,10 @@
                 // 模式切换
                 timeModeRow.querySelector('#modeTime').onchange = () => {
                     segModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = true);
-                    timeModeRow.querySelectorAll('input[type="text"]').forEach(i => i.disabled = false);
+                    timeModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = false);
                 };
                 segModeRow.querySelector('#modeSeg').onchange = () => {
-                    timeModeRow.querySelectorAll('input[type="text"]').forEach(i => i.disabled = true);
+                    timeModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = true);
                     segModeRow.querySelectorAll('input[type="number"]').forEach(i => i.disabled = false);
                 };
             }
@@ -1151,14 +1153,16 @@
                 console.error('[UI.runDownload] 失败:', error);
                 this.downloadState.status = 'error';
                 this.downloadState.error = error.message;
+            } finally {
+                const currentBtn = this.root.querySelector('.btn-download');
+                if (currentBtn) {
+                    currentBtn.disabled = false;
+                    currentBtn.textContent = this.getDownloadBtnText();
+                }
             }
 
-            // 更新UI
             const infoEl = this.root.querySelector('#downloadInfo');
             if (infoEl) infoEl.innerHTML = this.getDownloadInfoHtml();
-
-            btn.disabled = false;
-            btn.textContent = this.getDownloadBtnText();
         }
     }
 
