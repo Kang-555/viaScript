@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       单连续下载
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
@@ -618,48 +618,16 @@
     };
 
     const downloadMp4 = async (url, onProgress, writer, cancelCheck = null) => {
-        if (Config.isMobile) {
-            try {
-                if (confirm(`${Utils.getFilename(url)}\n是否调用浏览器自带下载器？\n(省流量、不闪退、速度快)`)) {
-                    const a = document.createElement('a');
-                    a.href = url;
-                    const fname = Utils.getFilename(url);
-                    a.download = fname.replace(/[\\/:*?"<>|]/g, '_');
-                    document.body.appendChild(a);
-                    a.click();
-                    setTimeout(() => a.remove(), 1000);
-                    onProgress(100, '调用浏览器原生下载', null);
-                    return { nativeDl: true };
-                }
-            } catch (e) {
-                console.warn('[downloadMp4] 原生下载方式失败，回退到脚本下载:', e);
-            }
-        }
-        console.log('[downloadMp4] 开始下载:', url);
-        const taskStartTs = Date.now();
-        let lastProgressUpdate = 0;
-        let loadedBytes = 0;
-        let totalBytes = 0;
-        const data = await Utils.request(url, true, (loaded, total, speed) => {
-            loadedBytes = loaded;
-            totalBytes = total;
-            const now = Date.now();
-            if (now - lastProgressUpdate < 200) return;
-            lastProgressUpdate = now;
-            const elapsed = (now - taskStartTs) / 1000;
-            const percent = total > 0 ? (loaded / total) * 100 : 0;
-            const etaSec = speed > 0 && total > 0 ? (total - loaded) / speed : 0;
-            const text = `${percent.toFixed(1)}% | ${Utils.formatBytes(loaded)}${total > 0 ? '/' + Utils.formatBytes(total) : ''} | ${Utils.formatBytes(speed)}/s${etaSec > 0 ? ' | ETA ' + Utils.formatTime(etaSec) : ''}`;
-            onProgress(percent, text, { totalBytes: loaded, speed });
-        }, cancelCheck);
-        const size = data ? (data.byteLength || data.length || 0) : 0;
-        if (totalBytes === 0) totalBytes = size;
-        const elapsed = (Date.now() - taskStartTs) / 1000;
-        const avgSpeed = elapsed > 0 ? totalBytes / elapsed : 0;
-        await writer.addFile(Utils.getFilename(url), new Uint8Array(data));
-        onProgress(100, `完成 ${Utils.formatBytes(totalBytes)} | 均速 ${Utils.formatBytes(avgSpeed)}/s`, { totalBytes, speed: avgSpeed });
-        console.log('[downloadMp4] 下载完成:', Utils.getFilename(url), '大小:', totalBytes);
-        return { nativeDl: false };
+        console.log('[downloadMp4] 触发浏览器原生下载:', url);
+        const a = document.createElement('a');
+        a.href = url;
+        const fname = Utils.getFilename(url);
+        a.download = fname.replace(/[\\/:*?"<>|]/g, '_');
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => a.remove(), 1000);
+        onProgress(100, '已触发浏览器下载', null);
+        return { nativeDl: true };
     };
 
     // ==========================================
