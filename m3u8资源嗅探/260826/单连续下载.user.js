@@ -726,7 +726,7 @@
 
             this.host = Utils.createElement('div', {
                 id: Config.uiId,
-                style: { position: 'fixed', bottom: 'calc(67px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
+                style: { position: 'fixed', bottom: 'calc(65px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
             });
 
             try {
@@ -990,18 +990,18 @@
                 const timeModeRow = Utils.createElement('div', { class: 'mode-row' }, [
                     Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'time', id: 'modeTime', checked: 'true' }),
                     Utils.createElement('label', { for: 'modeTime' }, '时间'),
-                    Utils.createElement('input', { id: 'timeStart', type: 'number', min: '0', max: '235959', value: timeStartVal, placeholder: '000000', style: 'width: 70px;' }),
+                    Utils.createElement('input', { id: 'timeStart', type: 'text', inputmode: 'numeric', pattern: '\d*', value: timeStartVal, placeholder: '000000', style: 'width: 70px;' }),
                     Utils.createElement('span', { style: 'color: #aaa;' }, '-'),
-                    Utils.createElement('input', { id: 'timeEnd', type: 'number', min: '0', max: '235959', value: timeEndVal, placeholder: '000000', style: 'width: 70px;' })
+                    Utils.createElement('input', { id: 'timeEnd', type: 'text', inputmode: 'numeric', pattern: '\d*', value: timeEndVal, placeholder: '000000', style: 'width: 70px;' })
                 ]);
                 body.appendChild(timeModeRow);
 
                 const segModeRow = Utils.createElement('div', { class: 'mode-row' }, [
                     Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'seg', id: 'modeSeg' }),
                     Utils.createElement('label', { for: 'modeSeg' }, '切片'),
-                    Utils.createElement('input', { id: 'segStart', type: 'number', min: '0', value: '0', placeholder: '起始', style: 'width: 50px;', disabled: 'true' }),
+                    Utils.createElement('input', { id: 'segStart', type: 'text', inputmode: 'numeric', pattern: '\d*', value: '0', placeholder: '起始', style: 'width: 50px;', disabled: 'true' }),
                     Utils.createElement('span', { style: 'color: #aaa;' }, '-'),
-                    Utils.createElement('input', { id: 'segEnd', type: 'number', min: '0', value: item.segmentCount !== null ? String(item.segmentCount - 1) : '', placeholder: '结束', style: 'width: 50px;', disabled: 'true' })
+                    Utils.createElement('input', { id: 'segEnd', type: 'text', inputmode: 'numeric', pattern: '\d*', value: item.segmentCount !== null ? String(item.segmentCount - 1) : '', placeholder: '结束', style: 'width: 50px;', disabled: 'true' })
                 ]);
                 body.appendChild(segModeRow);
 

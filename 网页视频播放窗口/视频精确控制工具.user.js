@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         视频悬浮精确控制
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      2.0
 // @description  智能识别主视频自动播放，两行紧凑控制条支持精确跳转、长按快进、倍速控制
 // @author       You
 // @match        *://*/*
@@ -43,16 +43,7 @@
   let autoPlayTriggered = false;
   let autoPlayRetryCount = 0;
 
-  let toggleDragState = {
-    isDragging: false,
-    moved: false,
-    startX: 0,
-    startY: 0,
-    buttonStartX: 0,
-    buttonStartY: 0
-  };
-  let positionPanel = null;
-  let controllerPosOffset = GM_getValue('controllerPosOffset', null);
+  let controllerPos = GM_getValue('controllerPos', null);
 
   // 持续前进按钮状态
   let forwardHoldActive = false;
@@ -171,10 +162,19 @@
 
     controller = document.createElement("div");
     controller.id = "video-precise-controller";
+
+    const savedPos = GM_getValue('controllerPos', null);
+    let posInit;
+    if (savedPos) {
+      posInit = `left:${savedPos.x}px;top:${savedPos.y}px;`;
+    } else {
+      posInit = `left:50%;bottom:85px;transform:translateX(-50%);`;
+    }
+
     controller.style.cssText = `
       position: fixed;
       background: ${CONFIG.debugBg};
-      padding: 12px;
+      padding: 0;
       border-radius: ${CONFIG.borderRadius};
       display: flex;
       flex-direction: column;
@@ -190,8 +190,110 @@
       -webkit-user-select:none;
       user-select:none;
       -webkit-touch-callout:none;
+      ${posInit}
       ${isEnabled ? 'opacity: 1;' : 'opacity: 0; pointer-events: none;'}
     `;
+
+    const dragHandle = document.createElement("div");
+    dragHandle.style.cssText = `
+      display:flex;align-items:center;justify-content:center;
+      padding:4px 0;background:rgba(255,255,255,0.05);
+      cursor:grab;border-bottom:1px solid rgba(255,255,255,0.08);
+      font-size:12px;color:rgba(255,255,255,0.35);
+      letter-spacing:6px;user-select:none;
+    `;
+    dragHandle.textContent = '⋮⋮';
+
+    const controllerInner = document.createElement("div");
+    controllerInner.style.cssText = `padding:12px;display:flex;flex-direction:column;gap:${CONFIG.gap};`;
+
+    let cDragging = false, cMoved = false;
+    let cDragStartX = 0, cDragStartY = 0;
+    let cBtnStartX = 0, cBtnStartY = 0;
+
+    const onCtrlMouseDown = (e) => {
+      cDragging = true;
+      cMoved = false;
+      cDragStartX = e.clientX;
+      cDragStartY = e.clientY;
+      const rect = controller.getBoundingClientRect();
+      cBtnStartX = rect.left;
+      cBtnStartY = rect.top;
+      dragHandle.style.cursor = 'grabbing';
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onCtrlMouseMove = (e) => {
+      if (!cDragging) return;
+      const dx = e.clientX - cDragStartX;
+      const dy = e.clientY - cDragStartY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) cMoved = true;
+      const maxX = window.innerWidth - controller.offsetWidth;
+      const maxY = window.innerHeight - 10;
+      const newX = Math.max(0, Math.min(maxX, cBtnStartX + dx));
+      const newY = Math.max(0, Math.min(maxY, cBtnStartY + dy));
+      controller.style.left = newX + 'px';
+      controller.style.top = newY + 'px';
+      controller.style.bottom = 'auto';
+      controller.style.right = 'auto';
+      controller.style.transform = 'none';
+    };
+
+    const onCtrlMouseUp = () => {
+      if (!cDragging) return;
+      cDragging = false;
+      dragHandle.style.cursor = 'grab';
+      if (cMoved) {
+        const rect = controller.getBoundingClientRect();
+        GM_setValue('controllerPos', { x: rect.left, y: rect.top });
+      }
+    };
+
+    dragHandle.addEventListener('mousedown', onCtrlMouseDown);
+    document.addEventListener('mousemove', onCtrlMouseMove);
+    document.addEventListener('mouseup', onCtrlMouseUp);
+
+    const onCtrlTouchStart = (e) => {
+      cDragging = true;
+      cMoved = false;
+      const t = e.touches[0];
+      cDragStartX = t.clientX;
+      cDragStartY = t.clientY;
+      const rect = controller.getBoundingClientRect();
+      cBtnStartX = rect.left;
+      cBtnStartY = rect.top;
+    };
+
+    const onCtrlTouchMove = (e) => {
+      if (!cDragging) return;
+      const t = e.touches[0];
+      const dx = t.clientX - cDragStartX;
+      const dy = t.clientY - cDragStartY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) cMoved = true;
+      const maxX = window.innerWidth - controller.offsetWidth;
+      const maxY = window.innerHeight - 10;
+      const newX = Math.max(0, Math.min(maxX, cBtnStartX + dx));
+      const newY = Math.max(0, Math.min(maxY, cBtnStartY + dy));
+      controller.style.left = newX + 'px';
+      controller.style.top = newY + 'px';
+      controller.style.bottom = 'auto';
+      controller.style.right = 'auto';
+      controller.style.transform = 'none';
+    };
+
+    const onCtrlTouchEnd = () => {
+      if (!cDragging) return;
+      cDragging = false;
+      if (cMoved) {
+        const rect = controller.getBoundingClientRect();
+        GM_setValue('controllerPos', { x: rect.left, y: rect.top });
+      }
+    };
+
+    dragHandle.addEventListener('touchstart', onCtrlTouchStart, { passive: true });
+    document.addEventListener('touchmove', onCtrlTouchMove, { passive: true });
+    document.addEventListener('touchend', onCtrlTouchEnd);
 
     // 第一行：跳转按钮 + 速度 + 播放 (紧凑布局)
     const controlWrap = document.createElement("div");
@@ -403,7 +505,8 @@
     // 缓存DOM引用
     domCache.playPauseBtn = playPauseBtn;
 
-    controller.append(controlWrap, progressWrap);
+    controllerInner.append(controlWrap, progressWrap);
+    controller.append(dragHandle, controllerInner);
     document.body.appendChild(controller);
 
     // 绑定视频播放/暂停事件，动态启停 UI 更新
@@ -415,7 +518,6 @@
         document.body.appendChild(controller);
         controller.style.opacity = isEnabled ? "1" : "0";
         controller.style.pointerEvents = isEnabled ? "auto" : "none";
-        updateControllerPosition();
       }
     });
     controllerObserver.observe(document.body, { childList: true, subtree: true });
@@ -494,11 +596,9 @@
     if (isEnabled) {
       if (!controller) {
         createController();
-        updateControllerPosition();
       } else {
         controller.style.opacity = "1";
         controller.style.pointerEvents = "auto";
-        updateControllerPosition();
         refreshDomCache();
       }
     } else {
@@ -545,265 +645,46 @@
     if (toggleButton) return;
     toggleButton = document.createElement("div");
     toggleButton.id = "video-controller-toggle";
-
-    const savedPos = GM_getValue('toggleButtonPos', null);
-    let posStyle;
-    if (savedPos) {
-      posStyle = `left:${savedPos.x}px;top:${savedPos.y}px;`;
-    } else {
-      posStyle = `bottom:25px;right:25px;`;
-    }
-
     toggleButton.style.cssText = `
-      position:fixed;width:46px;height:46px;border-radius:50%;
+      position:fixed;bottom:25px;right:25px;width:46px;height:46px;border-radius:50%;
       display:flex;align-items:center;justify-content:center;color:${CONFIG.textColor};
-      font-size:20px;z-index:2147483646;cursor:grab;transition:0.2s;border:none;
-      ${posStyle}
+      font-size:20px;z-index:2147483646;cursor:pointer;transition:0.3s;border:none;
     `;
     refreshToggleUI();
-    document.body.appendChild(toggleButton);
-
-    let movedDuringDrag = false;
-    let dragStartX = 0, dragStartY = 0;
-    let btnStartX = 0, btnStartY = 0;
-
-    const onMouseDown = (e) => {
-      toggleDragState.isDragging = true;
-      movedDuringDrag = false;
-      dragStartX = e.clientX;
-      dragStartY = e.clientY;
-      const rect = toggleButton.getBoundingClientRect();
-      btnStartX = rect.left;
-      btnStartY = rect.top;
-      toggleButton.style.cursor = 'grabbing';
-      e.preventDefault();
+    let longPressTimer = null;
+    let longPressTriggered = false;
+    const onPointerDown = () => {
+      longPressTriggered = false;
+      longPressTimer = setTimeout(() => {
+        longPressTriggered = true;
+        GM_setValue('controllerPos', null);
+        controllerPos = null;
+        if (controller) {
+          controller.style.left = '50%';
+          controller.style.bottom = '85px';
+          controller.style.right = 'auto';
+          controller.style.top = 'auto';
+          controller.style.transform = 'translateX(-50%)';
+        }
+      }, 600);
     };
-
-    const onMouseMove = (e) => {
-      if (!toggleDragState.isDragging) return;
-      const dx = e.clientX - dragStartX;
-      const dy = e.clientY - dragStartY;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedDuringDrag = true;
-      const maxX = window.innerWidth - 46;
-      const maxY = window.innerHeight - 46;
-      const newX = Math.max(0, Math.min(maxX, btnStartX + dx));
-      const newY = Math.max(0, Math.min(maxY, btnStartY + dy));
-      toggleButton.style.left = newX + 'px';
-      toggleButton.style.top = newY + 'px';
-      toggleButton.style.bottom = 'auto';
-      toggleButton.style.right = 'auto';
-      updateControllerPosition();
-    };
-
-    const onMouseUp = () => {
-      if (!toggleDragState.isDragging) return;
-      toggleDragState.isDragging = false;
-      toggleButton.style.cursor = 'grab';
-      if (movedDuringDrag) {
-        const rect = toggleButton.getBoundingClientRect();
-        GM_setValue('toggleButtonPos', { x: rect.left, y: rect.top });
-        hidePositionPanel();
-      } else {
-        showPositionPanel();
+    const onPointerUp = () => {
+      if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
       }
     };
-
-    const onTouchStart = (e) => {
-      toggleDragState.isDragging = true;
-      movedDuringDrag = false;
-      const t = e.touches[0];
-      dragStartX = t.clientX;
-      dragStartY = t.clientY;
-      const rect = toggleButton.getBoundingClientRect();
-      btnStartX = rect.left;
-      btnStartY = rect.top;
-    };
-
-    const onTouchMove = (e) => {
-      if (!toggleDragState.isDragging) return;
-      const t = e.touches[0];
-      const dx = t.clientX - dragStartX;
-      const dy = t.clientY - dragStartY;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedDuringDrag = true;
-      const maxX = window.innerWidth - 46;
-      const maxY = window.innerHeight - 46;
-      const newX = Math.max(0, Math.min(maxX, btnStartX + dx));
-      const newY = Math.max(0, Math.min(maxY, btnStartY + dy));
-      toggleButton.style.left = newX + 'px';
-      toggleButton.style.top = newY + 'px';
-      toggleButton.style.bottom = 'auto';
-      toggleButton.style.right = 'auto';
-      updateControllerPosition();
-    };
-
-    const onTouchEnd = () => {
-      if (!toggleDragState.isDragging) return;
-      toggleDragState.isDragging = false;
-      if (movedDuringDrag) {
-        const rect = toggleButton.getBoundingClientRect();
-        GM_setValue('toggleButtonPos', { x: rect.left, y: rect.top });
-        hidePositionPanel();
-      } else {
-        showPositionPanel();
-      }
-    };
-
-    toggleButton.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    toggleButton.addEventListener('touchstart', onTouchStart, { passive: true });
-    document.addEventListener('touchmove', onTouchMove, { passive: true });
-    document.addEventListener('touchend', onTouchEnd);
-  }
-
-  function updateControllerPosition() {
-    if (!controller) return;
-    if (!toggleButton) return;
-    const btnRect = toggleButton.getBoundingClientRect();
-    const ctrlWidth = 300;
-    const ctrlHeight = 120;
-    let left = btnRect.left + btnRect.width / 2 - ctrlWidth / 2;
-    let top = btnRect.top - ctrlHeight - 15;
-    if (controllerPosOffset) {
-      left += controllerPosOffset.x;
-      top += controllerPosOffset.y;
-    }
-    left = Math.max(8, Math.min(window.innerWidth - ctrlWidth - 8, left));
-    top = Math.max(8, top);
-    controller.style.left = left + 'px';
-    controller.style.top = top + 'px';
-    controller.style.bottom = 'auto';
-    controller.style.right = 'auto';
-    controller.style.transform = 'none';
-  }
-
-  function showPositionPanel() {
-    if (positionPanel) {
-      hidePositionPanel();
-      return;
-    }
-    positionPanel = document.createElement("div");
-    positionPanel.style.cssText = `
-      position:fixed;
-      background:${CONFIG.buttonColor};
-      border-radius:12px;
-      padding:10px;
-      display:flex;
-      flex-direction:column;
-      gap:8px;
-      z-index:2147483647;
-      box-shadow:0 4px 20px rgba(0,0,0,0.3);
-      min-width:140px;
-      color:${CONFIG.textColor};
-      font-size:12px;
-      -webkit-user-select:none;
-      user-select:none;
-    `;
-
-    const btnRect = toggleButton.getBoundingClientRect();
-    const panelWidth = 140;
-    const panelHeight = 180;
-    let panelLeft = btnRect.left + btnRect.width / 2 - panelWidth / 2;
-    let panelTop = btnRect.top - panelHeight - 10;
-    if (panelTop < 8) panelTop = btnRect.bottom + 10;
-    panelLeft = Math.max(8, Math.min(window.innerWidth - panelWidth - 8, panelLeft));
-    positionPanel.style.left = panelLeft + 'px';
-    positionPanel.style.top = panelTop + 'px';
-
-    const header = document.createElement('div');
-    header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-    const headerTitle = document.createElement('span');
-    headerTitle.textContent = '控制面板位置';
-    headerTitle.style.cssText = 'font-size:12px;opacity:0.8;';
-    const closeBtn = document.createElement('span');
-    closeBtn.textContent = '✕';
-    closeBtn.style.cssText = 'cursor:pointer;opacity:0.6;font-size:14px;padding:0 4px;';
-    closeBtn.onclick = (e) => { e.stopPropagation(); hidePositionPanel(); };
-    header.append(headerTitle, closeBtn);
-
-    const toggleRow = document.createElement('div');
-    toggleRow.style.cssText = 'display:flex;gap:6px;align-items:center;';
-    const toggleLabel = document.createElement('span');
-    toggleLabel.textContent = isEnabled ? '已开启' : '已关闭';
-    toggleLabel.style.cssText = 'flex:1;font-size:12px;';
-    const enableBtn = document.createElement('button');
-    enableBtn.textContent = isEnabled ? 'ON' : 'OFF';
-    enableBtn.style.cssText = `background:${isEnabled ? CONFIG.accentColor : CONFIG.buttonColor};color:${CONFIG.textColor};border:none;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;`;
-    enableBtn.onclick = () => {
+    toggleButton.addEventListener('mousedown', onPointerDown);
+    toggleButton.addEventListener('mouseup', onPointerUp);
+    toggleButton.addEventListener('mouseleave', onPointerUp);
+    toggleButton.addEventListener('touchstart', onPointerDown, { passive: true });
+    toggleButton.addEventListener('touchend', onPointerUp);
+    toggleButton.addEventListener('touchcancel', onPointerUp);
+    toggleButton.onclick = () => {
+      if (longPressTriggered) return;
       toggleController();
-      enableBtn.textContent = isEnabled ? 'ON' : 'OFF';
-      toggleLabel.textContent = isEnabled ? '已开启' : '已关闭';
     };
-    toggleRow.append(toggleLabel, enableBtn);
-
-    const dirPad = document.createElement('div');
-    dirPad.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:4px;';
-    const dirs = [
-      { text: '←', dx: -20, dy: 0 },
-      { text: '↑', dx: 0, dy: -20 },
-      { text: '↓', dx: 0, dy: 20 },
-      { text: '→', dx: 20, dy: 0 }
-    ];
-    dirs.forEach(d => {
-      const b = document.createElement('button');
-      b.textContent = d.text;
-      b.style.cssText = `background:${CONFIG.accentColor};color:${CONFIG.textColor};border:none;border-radius:6px;padding:7px;cursor:pointer;font-size:13px;`;
-      b.onclick = () => { adjustControllerOffset(d.dx, d.dy); };
-      dirPad.appendChild(b);
-    });
-
-    const centerBtn = document.createElement('button');
-    centerBtn.textContent = '居中';
-    centerBtn.style.cssText = `grid-column:span 2;background:${CONFIG.buttonColor};color:${CONFIG.textColor};border:none;border-radius:6px;padding:6px;cursor:pointer;font-size:11px;`;
-    centerBtn.onclick = () => { resetControllerPosition(); };
-
-    const resetRow = document.createElement('div');
-    resetRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:4px;';
-    const resetBtn = document.createElement('button');
-    resetBtn.textContent = '重置';
-    resetBtn.style.cssText = `background:${CONFIG.buttonColor};color:${CONFIG.textColor};border:none;border-radius:6px;padding:6px;cursor:pointer;font-size:11px;`;
-    resetBtn.onclick = () => {
-      GM_setValue('toggleButtonPos', null);
-      GM_setValue('controllerPosOffset', null);
-      controllerPosOffset = null;
-      alert('位置已重置，请刷新页面');
-    };
-    resetRow.append(centerBtn, resetBtn);
-
-    positionPanel.append(header, toggleRow, dirPad, resetRow);
-    document.body.appendChild(positionPanel);
-
-    setTimeout(() => {
-      const closeOnOutside = (e) => {
-        if (!positionPanel) return;
-        if (positionPanel.contains(e.target)) return;
-        if (e.target === toggleButton) return;
-        hidePositionPanel();
-        document.removeEventListener('click', closeOnOutside, true);
-      };
-      document.addEventListener('click', closeOnOutside, true);
-    }, 10);
-  }
-
-  function hidePositionPanel() {
-    if (positionPanel) {
-      positionPanel.remove();
-      positionPanel = null;
-    }
-  }
-
-  function adjustControllerOffset(dx, dy) {
-    if (!controllerPosOffset) controllerPosOffset = { x: 0, y: 0 };
-    controllerPosOffset.x += dx;
-    controllerPosOffset.y += dy;
-    GM_setValue('controllerPosOffset', controllerPosOffset);
-    updateControllerPosition();
-  }
-
-  function resetControllerPosition() {
-    controllerPosOffset = { x: 0, y: 0 };
-    GM_setValue('controllerPosOffset', controllerPosOffset);
-    updateControllerPosition();
+    document.body.appendChild(toggleButton);
   }
 
   // ========== 视频操作 ==========
@@ -903,7 +784,6 @@
       videoObserver.disconnect();
       videoObserver = null;
     }
-    hidePositionPanel();
     if (controller && controller.parentNode) controller.parentNode.removeChild(controller);
     if (toggleButton && toggleButton.parentNode) toggleButton.parentNode.removeChild(toggleButton);
     controller = null;
@@ -927,7 +807,6 @@
     autoHideWhenNoVideo();
     if (isEnabled) {
       createController();
-      updateControllerPosition();
     }
     setTimeout(tryAutoPlayMainVideo, CONFIG.autoPlayDelay);
   }
