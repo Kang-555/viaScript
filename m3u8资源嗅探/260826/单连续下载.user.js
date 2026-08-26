@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name       单连续下载
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      3.0.0
 // @description  网页m3u8嗅探下载；m3u8分片直接拼接为TS文件；AES‑128解密；适配Via/Kiwi手机浏览器
 // @author       You
 // @license      MIT
 // @match        *://*/*
 // @connect      *
 // @grant        GM_xmlhttpRequest
+// @grant        GM_download
+// @grant        GM_abort_download
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -618,16 +620,32 @@
     };
 
     const downloadMp4 = async (url, onProgress, writer, cancelCheck = null) => {
-        console.log('[downloadMp4] 触发浏览器原生下载:', url);
-        const a = document.createElement('a');
-        a.href = url;
-        const fname = Utils.getFilename(url);
-        a.download = fname.replace(/[\\/:*?"<>|]/g, '_');
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => a.remove(), 1000);
-        onProgress(100, '已触发浏览器下载', null);
-        return { nativeDl: true };
+        console.log('[downloadMp4] GM_download 原生下载:', url);
+        const fname = Utils.getFilename(url).replace(/[\\/:*?"<>|]/g, '_');
+        onProgress(0, '已提交浏览器下载', null);
+        return new Promise((resolve, reject) => {
+            const jobId = GM_download({
+                url: url,
+                name: fname,
+                onload: () => {
+                    console.log('[downloadMp4] 下载完成');
+                    resolve({ nativeDl: true });
+                },
+                onerror: (err) => {
+                    console.error('[downloadMp4] 下载错误:', err);
+                    reject(new Error(err.error || '下载失败'));
+                }
+            });
+            if (jobId && typeof jobId === 'number') {
+                const checkCancel = setInterval(() => {
+                    if (cancelCheck && cancelCheck()) {
+                        clearInterval(checkCancel);
+                        try { GM_abort_download(jobId); } catch (e) { }
+                        reject(new Error('Cancelled'));
+                    }
+                }, 200);
+            }
+        });
     };
 
     // ==========================================
@@ -684,7 +702,7 @@
                 const dlResult = await downloadMp4(url, onProgress, writer, cancelCheck);
                 if (dlResult.cancelled) { writer.clear(); return { cancelled: true }; }
                 if (dlResult.nativeDl) {
-                    console.log('[TaskRunner] 原生下载已触发，跳过打包');
+                    console.log('[TaskRunner] GM_download 已触发，跳过打包');
                     return { nativeDl: true };
                 }
                 onProgress(100, '保存中...', null);
