@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       M3U8嗅探下载器 (下载队列 + Tab面板版)
 // @namespace    http://tampermonkey.net/
-// @version      4.0.0
+// @version      4.0.1
 // @description  网页m3u8/mp4嗅探下载；多任务队列串行调度；AES-128解密；时间/分片截取；Tab切换面板
 // @author       You
 // @license      MIT
@@ -610,16 +610,7 @@
                     console.log('[TaskRunner] 时间换算分片:', startIdx, '-', endIdx);
                 }
 
-                const isFullRange = (startIdx === null && endIdx === null)
-                    || (startIdx === 0 && endIdx >= segments.length - 1);
-
-                if (isFullRange) {
-                    console.log('[TaskRunner] 全量下载，GM_download m3u8链接');
-                    writer.clear();
-                    return await downloadM3u8Native(url, filename, onProgress, cancelCheck);
-                }
-
-                console.log('[TaskRunner] 分片下载模式:', startIdx, '-', endIdx);
+                console.log('[TaskRunner] 分片下载模式:', startIdx ?? 0, '-', endIdx ?? segments.length - 1);
 
                 const keyCache = new Map();
                 const uniqueKeys = [...new Set(segments.filter(s => s.key).map(s => s.key))];
@@ -741,7 +732,7 @@
             try {
                 const saveName = task.item.filename || document.title || 'video';
                 task.item.filename = saveName;
-                await TaskRunner(
+                const result = await TaskRunner(
                     task.item.url,
                     task.item.type,
                     (percent, text, data) => {
@@ -753,8 +744,13 @@
                     task.opt,
                     () => task.cancelFlag
                 );
-                task.status = 'done';
-                Bus.emit('queue:task-done', task);
+                if (result && result.cancelled) {
+                    task.status = 'cancelled';
+                    Bus.emit('queue:task-cancelled', task);
+                } else {
+                    task.status = 'done';
+                    Bus.emit('queue:task-done', task);
+                }
             } catch (err) {
                 if (task.cancelFlag) {
                     task.status = 'cancelled';
@@ -817,17 +813,36 @@
     // 8. UIProxy (UI 内部类，管理单任务 DOM)
     // ==========================================
     class UIProxy {
-        constructor(taskId, rowEl, statusEl, infoEl, btnsEl, queueRef) {
+        constructor(taskId, rowEl, statusEl, timeEl, infoEl, btnsEl, queueRef) {
             this.taskId = taskId;
             this.rowEl = rowEl;
             this.statusEl = statusEl;
+            this.timeEl = timeEl;
             this.infoEl = infoEl;
             this.btnsEl = btnsEl;
             this.queue = queueRef;
         }
 
+        formatTimeRange(task) {
+            const opt = task.opt || {};
+            const item = task.item || {};
+            if (item.type !== 'm3u8') return '';
+            if (opt.beginSec !== undefined && opt.endSec !== undefined) {
+                return `${Utils.formatTime(opt.beginSec)} - ${Utils.formatTime(opt.endSec)}`;
+            }
+            if (item.duration) return Utils.formatTime(item.duration);
+            return '';
+        }
+
         updateProgress(task) {
-            this.infoEl.textContent = task.progress.text || '';
+            const p = task.progress;
+            if (task.item.type === 'm3u8') {
+                const segPart = `${p.completedCount}/${p.total ?? p.totalCount ?? '?'}分片`;
+                const bytesPart = p.totalBytes ? Utils.formatBytes(p.totalBytes) : '';
+                this.infoEl.textContent = [segPart, bytesPart].filter(Boolean).join(' | ');
+            } else {
+                this.infoEl.textContent = p.text || '';
+            }
         }
 
         updateStatus(task) {
@@ -835,6 +850,7 @@
             this.statusEl.className = 'q-status q-status-' + s;
             const labelMap = { waiting: '等待中', downloading: '下载中', done: '完成', error: '失败', cancelled: '已取消' };
             this.statusEl.textContent = labelMap[s] || s;
+            this.timeEl.textContent = this.formatTimeRange(task);
 
             this.btnsEl.innerHTML = '';
             if (s === 'waiting' || s === 'downloading') {
@@ -849,9 +865,10 @@
                 }, '移除'));
             }
 
-            if (s === 'cancelled') this.infoEl.textContent = '已取消';
+            if (s === 'waiting') this.infoEl.textContent = '等待中...';
+            else if (s === 'cancelled') this.infoEl.textContent = '已取消';
             else if (s === 'error') this.infoEl.textContent = '错误: ' + (task.error || '未知');
-            else if (s === 'done') this.infoEl.textContent = '下载完成';
+            else if (s === 'done') this.infoEl.textContent = this.infoEl.textContent || '下载完成';
         }
 
         destroy() {
@@ -1045,6 +1062,8 @@
                     display: flex; flex-direction: column; gap: 3px; font-size: 11px;
                 }
                 .queue-row-head { display: flex; align-items: center; gap: 6px; }
+                .queue-row-foot { display: flex; align-items: center; gap: 6px; }
+                .queue-row-time { color: #777; font-size: 9px; flex-shrink: 0; min-width: 70px; }
                 .queue-row-name { font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
                 .q-status {
                     font-size: 9px; padding: 1px 5px; border-radius: 2px; font-weight: bold; flex-shrink: 0;
@@ -1054,7 +1073,7 @@
                 .q-status-done { background: #2196F3; color: #fff; }
                 .q-status-error { background: #f44336; color: #fff; }
                 .q-status-cancelled { background: #888; color: #fff; }
-                .queue-row-info { color: #aaa; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                .queue-row-info { color: #aaa; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
                 .btn-clear-all { background: #f44336; color: white; }
                 .btn-row-inline .btn { padding: 2px 6px; font-size: 9px; border: none; border-radius: 2px; cursor: pointer; }
                 .btn-row-inline .btn-cancel { background: #ff9800; color: #000; }
@@ -1077,7 +1096,7 @@
             });
 
             if (name === 'download-setting') this.refreshDownloadSettingTab();
-            if (name === 'queue') this.refreshQueueTab();
+            if (name === 'queue') this.renderQueueTab();
         }
 
         // ==================================
@@ -1337,6 +1356,7 @@
         // Tab3 队列
         // ==================================
         renderQueueTab() {
+            this.queueProxies.clear();
             this.panelQueue.innerHTML = '';
 
             const headerBar = Utils.createElement('div', { class: 'queue-header-bar' }, [
@@ -1374,16 +1394,18 @@
             const rowEl = Utils.createElement('div', { class: 'queue-row' });
             const nameEl = Utils.createElement('span', { class: 'queue-row-name' }, task.item.filename || Utils.getFilename(task.item.url));
             const statusEl = Utils.createElement('span', { class: 'q-status q-status-' + task.status });
+            const timeEl = Utils.createElement('span', { class: 'queue-row-time' });
             const infoEl = Utils.createElement('span', { class: 'queue-row-info' });
-
             const btnsEl = Utils.createElement('span', { class: 'btn-row-inline' });
-            const headRow = Utils.createElement('div', { class: 'queue-row-head' }, [nameEl, statusEl, btnsEl]);
+
+            const headRow = Utils.createElement('div', { class: 'queue-row-head' }, [nameEl, statusEl]);
+            const footRow = Utils.createElement('div', { class: 'queue-row-foot' }, [timeEl, infoEl, btnsEl]);
 
             rowEl.appendChild(headRow);
-            rowEl.appendChild(infoEl);
+            rowEl.appendChild(footRow);
             parentEl.appendChild(rowEl);
 
-            const proxy = new UIProxy(task.id, rowEl, statusEl, infoEl, btnsEl, this.queue);
+            const proxy = new UIProxy(task.id, rowEl, statusEl, timeEl, infoEl, btnsEl, this.queue);
             proxy.updateStatus(task);
             if (task.progress.text) proxy.updateProgress(task);
             this.queueProxies.set(task.id, proxy);
