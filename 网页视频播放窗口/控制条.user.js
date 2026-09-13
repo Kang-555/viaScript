@@ -197,7 +197,7 @@
     const dragHandle = document.createElement("div");
     dragHandle.style.cssText = `
       position:absolute;top:0;left:0;width:7px;height:7px;
-      background:transparent;cursor:grab;user-select:none;z-index:2;
+      background:rgba(200,200,200,0.35);cursor:grab;user-select:none;z-index:2;border-radius:0 0 4px 0;
     `;
 
     const controllerInner = document.createElement("div");
