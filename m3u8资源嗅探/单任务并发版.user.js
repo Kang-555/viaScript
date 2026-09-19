@@ -37,18 +37,12 @@
     const Config = {
         scanInterval: 2000,
         uiId: 'gm-sniffer-v2-ts',
-        isMobile: IS_MOBILE,
         maxThreads: IS_MOBILE ? 10 : 30,
         maxThreadsCap: IS_MOBILE ? 15 : 50,
         adaptiveThreading: true,
         maxRetries: 3,
         retryDelay: 1000,
-        chunkSize: 256 * 1024,
-        colors: {
-            primary: window.self === window.top ? '#4caf50' : '#e91e63',
-            background: 'rgba(0, 0, 0, 0.85)',
-            text: '#ffffff'
-        }
+        primaryColor: window.self === window.top ? '#4caf50' : '#e91e63'
     };
 
     // ==========================================
@@ -198,15 +192,7 @@
             return decodeURIComponent(name);
         },
 
-        resolveUrl: (baseUrl, relativeUrl) => {
-            if (relativeUrl.startsWith('http')) return relativeUrl;
-            if (relativeUrl.startsWith('/')) {
-                const u = new URL(baseUrl);
-                return u.origin + relativeUrl;
-            }
-            const path = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
-            return path + relativeUrl;
-        },
+        resolveUrl: (baseUrl, relativeUrl) => new URL(relativeUrl, baseUrl).href,
 
         copyToClipboard: (text) => {
             if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -284,8 +270,7 @@
             this.paused = false;
             this.rules = {
                 m3u8: /\.m3u8($|\?)|application\/.*mpegurl/i,
-                mp4: /\.mp4($|\?)|video\/mp4/i,
-                mov: /\.mov($|\?)|video\/quicktime/i
+                mp4: /\.(mp4|mov)($|\?)|video\/(mp4|quicktime)/i
             };
         }
 
@@ -367,18 +352,15 @@
     // 6. 下载引擎 (底层，零改动)
     // ==========================================
     class VideoWriter {
-        constructor() { this.buffers = []; this.totalSize = 0; }
-        async addFile(name, data) {
-            const uint8 = data instanceof Uint8Array ? data : new Uint8Array(data);
-            this.buffers.push(uint8);
-            this.totalSize += uint8.length;
+        constructor() { this.buffers = []; }
+        async addFile(data) {
+            this.buffers.push(data instanceof Uint8Array ? data : new Uint8Array(data));
         }
         async close(filename) {
-            if (this.buffers.length === 0) throw new Error('下载失败：获取分片数据为空');
-            const tsBlob = new Blob(this.buffers, { type: 'video/mp2t' });
-            Utils.downloadBlob(tsBlob, filename.replace(/\.zip$/i, '.ts'));
+            if (this.buffers.length === 0) throw new Error('下载失败：分片数据为空');
+            Utils.downloadBlob(new Blob(this.buffers, { type: 'video/mp2t' }), filename);
         }
-        clear() { this.buffers = []; this.totalSize = 0; }
+        clear() { this.buffers = []; }
     }
 
     const parseM3u8 = async (url) => {
@@ -546,7 +528,7 @@
                         if (cancelCheck && cancelCheck()) return;
                         const segData = results[nextReadyIdx];
                         if (segData.length > 0) {
-                            await writer.addFile('', segData);
+                            await writer.addFile(segData);
                         } else {
                             console.warn(`[downloadM3u8BySegments] 跳过空分片#${nextReadyIdx}`);
                         }
@@ -586,37 +568,15 @@
         return { successCount, failCount, totalBytes };
     };
 
-    const downloadMp4 = async (url, saveName, onProgress, writer, cancelCheck = null) => {
+    const downloadMp4 = async (url, saveName, onProgress, cancelCheck = null) => {
         console.log('[downloadMp4] GM_download 原生下载:', url);
         const fname = (saveName || Utils.getFilename(url)).replace(/[\\/:*?"<>|]/g, '_');
         onProgress(0, '已提交浏览器下载', null);
         return new Promise((resolve, reject) => {
             const jobId = GM_download({
-                url: url, name: fname,
-                onload: () => { console.log('[downloadMp4] 下载完成'); resolve({ nativeDl: true }); },
-                onerror: (err) => { console.error('[downloadMp4] 下载错误:', err); reject(new Error(err.error || '下载失败')); }
-            });
-            if (jobId && typeof jobId === 'number') {
-                const checkCancel = setInterval(() => {
-                    if (cancelCheck && cancelCheck()) {
-                        clearInterval(checkCancel);
-                        try { GM_abort_download(jobId); } catch (e) { }
-                        reject(new Error('Cancelled'));
-                    }
-                }, 200);
-            }
-        });
-    };
-
-    const downloadM3u8Native = async (url, safeName, onProgress, cancelCheck = null) => {
-        console.log('[downloadM3u8Native] GM_download m3u8链接:', url);
-        const fname = (safeName || 'video').replace(/[\\/:*?"<>|]/g, '_') + '.m3u8';
-        onProgress(0, '已提交浏览器下载', null);
-        return new Promise((resolve, reject) => {
-            const jobId = GM_download({
-                url: url, name: fname,
-                onload: () => { console.log('[downloadM3u8Native] 下载完成'); resolve({ nativeDl: true }); },
-                onerror: (err) => { console.error('[downloadM3u8Native] 下载错误:', err); reject(new Error(err.error || '下载失败')); }
+                url, name: fname,
+                onload: () => resolve({ nativeDl: true }),
+                onerror: (err) => reject(new Error(err.error || '下载失败'))
             });
             if (jobId && typeof jobId === 'number') {
                 const checkCancel = setInterval(() => {
@@ -632,114 +592,74 @@
 
     const TaskRunner = async (url, type, onProgress, opt = {}, cancelCheck = null) => {
         const safeName = (document.title || 'video').replace(/[\\/:*?"<>|]/g, ' ').trim();
-        let filename = type === 'm3u8' ? safeName + '.ts' : safeName + '.mp4';
-        console.log('[TaskRunner] 开始:', { url, type, opt });
+        const filename = type === 'm3u8' ? safeName + '.ts' : safeName + '.mp4';
+        const bail = () => cancelCheck && cancelCheck() ? true : false;
 
-        const writer = new VideoWriter();
         try {
             if (type === 'm3u8') {
                 onProgress(0, '解析m3u8...', null);
-                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                const parseResult = await parseM3u8(url);
-                const { segments, timeList } = parseResult;
-                console.log('[TaskRunner] 解析完成, 分片数:', segments.length);
+                if (bail()) return { cancelled: true };
+                const { segments, timeList } = await parseM3u8(url);
 
-                let startIdx = opt.startIdx ?? null;
-                let endIdx = opt.endIdx ?? null;
-
+                let startIdx = opt.startIdx ?? null, endIdx = opt.endIdx ?? null;
                 if (opt.beginSec !== undefined && opt.endSec !== undefined) {
-                    const mapped = timeToSegmentIndex(timeList, opt.beginSec, opt.endSec);
-                    startIdx = mapped.startIdx;
-                    endIdx = mapped.endIdx;
-                    console.log('[TaskRunner] 时间换算分片:', startIdx, '-', endIdx);
+                    ({ startIdx, endIdx } = timeToSegmentIndex(timeList, opt.beginSec, opt.endSec));
                 }
-
-                console.log('[TaskRunner] 分片下载模式:', startIdx ?? 0, '-', endIdx ?? segments.length - 1);
 
                 const keyCache = new Map();
                 const uniqueKeys = [...new Set(segments.filter(s => s.key).map(s => s.key))];
                 if (uniqueKeys.length > 0) {
                     onProgress(0, '获取加密密钥...', null);
-                    if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
+                    if (bail()) return { cancelled: true };
                     const keyResults = await Promise.all(uniqueKeys.map(keyUrl =>
                         Utils.request(keyUrl, true).then(data => [keyUrl, new Uint8Array(data)])
                     ));
                     for (const [keyUrl, keyData] of keyResults) keyCache.set(keyUrl, keyData);
                 }
-                console.log('[TaskRunner] 开始下载分片');
-                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                await downloadM3u8BySegments(segments, keyCache, onProgress, writer, startIdx, endIdx, cancelCheck);
-                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                console.log('[TaskRunner] 分片下载完成');
-                onProgress(100, '保存中...', null);
-                console.log('[TaskRunner] 生成TS文件:', filename);
-                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                await writer.close(filename);
-                console.log('[TaskRunner] TS文件生成完成');
-                onProgress(100, '下载完成', null);
+
+                if (bail()) return { cancelled: true };
+                const writer = new VideoWriter();
+                try {
+                    await downloadM3u8BySegments(segments, keyCache, onProgress, writer, startIdx, endIdx, cancelCheck);
+                    if (bail()) return { cancelled: true };
+                    await writer.close(filename);
+                    onProgress(100, '下载完成', null);
+                    return { nativeDl: false };
+                } finally { writer.clear(); }
             } else {
                 onProgress(0, '下载中...', null);
-                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                const dlResult = await downloadMp4(url, filename, onProgress, writer, cancelCheck);
-                if (dlResult.cancelled) { writer.clear(); return { cancelled: true }; }
-                if (dlResult.nativeDl) {
-                    console.log('[TaskRunner] GM_download 已触发，跳过打包');
-                    return { nativeDl: true };
-                }
-                onProgress(100, '保存中...', null);
-                console.log('[TaskRunner] 生成文件:', filename);
-                if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                await writer.close(filename);
-                console.log('[TaskRunner] 文件生成完成');
+                if (bail()) return { cancelled: true };
+                await downloadMp4(url, filename, onProgress, cancelCheck);
                 onProgress(100, '下载完成', null);
+                return { nativeDl: true };
             }
-            return { nativeDl: false };
         } catch (error) {
-            console.error('[TaskRunner] 错误:', error);
-            writer.clear();
             if (error.message === 'Cancelled') return { cancelled: true };
             throw error;
         }
     };
 
     // ==========================================
-    // 7. 下载队列管理器 (新增)
+    // 7. 下载队列管理器
     // ==========================================
-    const optEqual = (a, b) => {
-        if (!a || !b) return (!a && !b);
-        const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-        for (const k of keys) if ((a[k] ?? null) !== (b[k] ?? null)) return false;
-        return true;
-    };
-
     class QueueManager {
         constructor() {
             this.tasks = new Map();
             this.activeId = null;
             this.isRunning = false;
             this.nextId = 1;
-            this.maxConcurrent = 1;
         }
 
         addTask(item, opt) {
-            for (const t of this.tasks.values()) {
-                if (t.status === 'waiting' || t.status === 'downloading') {
-                    if (t.item.url === item.url && optEqual(t.opt, opt)) {
-                        console.warn('[Queue] 重复任务已拒绝');
-                        return -1;
-                    }
-                }
-            }
             const taskId = this.nextId++;
             const task = {
                 id: taskId,
                 item: { ...item },
                 opt: { ...opt },
                 status: 'waiting',
-                progress: { percent: 0, text: '', completedCount: 0, totalCount: 0, totalBytes: 0, speed: 0 },
+                progress: { percent: 0, text: '', completedCount: 0, totalBytes: 0, speed: 0 },
                 cancelFlag: false,
-                error: null,
-                startTime: Date.now()
+                error: null
             };
             this.tasks.set(taskId, task);
             Bus.emit('queue:task-added', task);
@@ -822,18 +742,6 @@
             Bus.emit('queue:task-removed', taskId);
         }
 
-        cancelAll() {
-            for (const t of this.tasks.values()) {
-                if (t.status === 'waiting') {
-                    t.cancelFlag = true;
-                    t.status = 'cancelled';
-                    Bus.emit('queue:task-cancelled', t);
-                } else if (t.status === 'downloading') {
-                    t.cancelFlag = true;
-                }
-            }
-        }
-
         clearCompleted() {
             for (const [id, t] of this.tasks) {
                 if (t.status === 'done' || t.status === 'error' || t.status === 'cancelled') {
@@ -881,7 +789,7 @@
         updateProgress(task) {
             const p = task.progress;
             if (task.item.type === 'm3u8') {
-                const segPart = `${p.completedCount}/${p.total ?? p.totalCount ?? '?'}分片`;
+                const segPart = `${p.completedCount}/${p.total ?? '?'}分片`;
                 const bytesPart = p.totalBytes ? Utils.formatBytes(p.totalBytes) : '';
                 this.infoEl.textContent = [segPart, bytesPart].filter(Boolean).join(' | ');
             } else {
@@ -940,7 +848,6 @@
             this.panelSniffer = null;
             this.panelSetting = null;
             this.panelQueue = null;
-            this.btnAddTask = null;
             this.addBtnFeedbackTimer = null;
             this.inited = false;
 
@@ -1009,112 +916,104 @@
         }
 
         buildStyles() {
-            const c = Config.colors;
+            const p = Config.primaryColor;
             return `
                 :host, #${Config.uiId} {
-                    --primary: ${c.primary};
-                    --bg: ${c.background};
-                    --text: ${c.text};
-                    --bg-input: #0f3460;
-                    --divider: rgba(255,255,255,0.1);
-                    --divider-soft: rgba(255,255,255,0.06);
-                    --dim: #aaa;
-                    --danger: #f44336;
-                    --info: #2196F3;
-                    font-family: sans-serif; font-size: 11px;
+                    --p: ${p}; --bg: rgba(0,0,0,.85); --text: #fff;
+                    --dim: #aaa; --divider: rgba(255,255,255,.08);
+                    --danger: #f44336; --info: #2196F3; --warn: #ff9800;
+                    font: 11px/1 sans-serif; color: var(--text);
                 }
                 .main-panel {
                     width: min(340px, calc(100vw - 20px)); max-height: 400px;
-                    background: var(--bg); color: var(--text);
-                    border: 1px solid var(--primary); border-radius: 6px;
-                    backdrop-filter: blur(5px);
+                    background: var(--bg); border: 1px solid var(--p); border-radius: 6px;
+                    backdrop-filter: blur(5px); box-shadow: 0 2px 10px rgba(0,0,0,.5);
                     display: flex; flex-direction: column; overflow: hidden;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
                 }
-                .tab-header, .tab-body { display: flex; flex-direction: column; }
-                .tab-header { flex-direction: row; background: var(--divider-soft); border-bottom: 1px solid var(--divider); }
-                .tab-body { flex: 1; overflow: hidden; }
+                .tab-header {
+                    display: flex; background: rgba(255,255,255,.04);
+                    border-bottom: 1px solid var(--divider);
+                }
                 .tab-btn {
-                    flex: 1; padding: 7px 4px; background: 0; border: 0;
-                    color: var(--dim); font-size: 11px; font-weight: bold; cursor: pointer;
-                    border-bottom: 2px solid transparent;
+                    flex: 1; padding: 7px 4px; background: 0; border: 0; cursor: pointer;
+                    color: var(--dim); font-weight: bold; border-bottom: 2px solid transparent;
                 }
-                .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+                .tab-btn.active { color: var(--p); border-bottom-color: var(--p); }
                 .close-btn {
                     padding: 4px 10px; color: #888; cursor: pointer; font-size: 14px;
                     user-select: none; border-left: 1px solid var(--divider);
                 }
                 .close-btn:hover { color: #fff; }
-                .tab-panel { display: none; flex: 1; overflow-y: auto; }
+                .tab-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+                .tab-panel { display: none; flex: 1; overflow-y: auto; padding: 4px 0; }
                 .tab-panel.active { display: block; }
 
-                .sniffer-list, .setting-body, .queue-list { padding: 4px 0; }
-                .sniffer-item, .queue-row { padding: 6px 8px; border-bottom: 1px solid var(--divider-soft); }
+                .sniffer-item, .queue-row { padding: 6px 8px; border-bottom: 1px solid var(--divider); }
                 .sniffer-item:last-child, .queue-row:last-child { border-bottom: none; }
 
                 .item-type {
-                    display: inline-block; background: var(--primary); color: #000;
-                    padding: 1px 4px; border-radius: 2px; font-weight: bold; font-size: 9px; margin-right: 4px;
+                    display: inline-block; padding: 1px 4px; border-radius: 2px;
+                    font-weight: bold; font-size: 9px; margin-right: 4px;
+                    background: var(--p); color: #000;
                 }
                 .item-type.mp4 { background: var(--info); color: #fff; }
                 .item-name, .queue-row-name { font-weight: bold; }
                 .item-name { margin-bottom: 2px; word-break: break-all; }
                 .item-info, .sniffer-status, .setting-info, .queue-row-info { color: var(--dim); font-size: 10px; }
                 .item-info { margin-bottom: 4px; }
-                .item-btns, .btn-row, .mode-row, .input-row { display: flex; gap: 4px; }
-                .btn-row, .mode-row, .input-row { margin-bottom: 4px; align-items: center; }
-                .btn-row { margin-top: 8px; }
 
-                .btn, .head-btn, .btn-queue-add, .btn-back-sniff {
-                    border-radius: 3px; cursor: pointer; font-weight: bold;
-                }
-                .btn { border: 0; padding: 4px 8px; font-size: 10px; }
+                .item-btns, .btn-row, .mode-row { display: flex; gap: 4px; align-items: center; }
+                .btn-row { margin: 8px 4px 4px; }
+                .mode-row { margin: 4px; }
+
+                button { border-radius: 3px; cursor: pointer; font-weight: bold; border: 0; }
+                .btn { padding: 4px 8px; font-size: 10px; }
                 .btn-copy { background: #555; color: #fff; }
-                .btn-select, .btn-queue-add { background: var(--primary); color: #000; }
-                .btn-queue-add { flex: 1; padding: 6px 8px; font-size: 11px; border: 0; }
-                .btn-queue-add:disabled { opacity: 0.6; cursor: default; }
-                .btn-clear-all, .btn-row-inline .btn-remove, .btn-cancel { background: var(--danger); color: #fff; }
-                .btn-row-inline .btn-cancel { background: #ff9800; color: #000; }
-                .btn-row-inline .btn { padding: 2px 6px; font-size: 9px; border: 0; border-radius: 2px; }
+                .btn-select, .btn-queue-add { background: var(--p); color: #000; }
+                .btn-queue-add { flex: 1; padding: 6px 8px; font-size: 11px; }
+                .btn-queue-add:disabled { opacity: .6; cursor: default; }
+                .btn-remove, .btn-clear-all { background: var(--danger); color: #fff; }
+                .btn-cancel { background: var(--warn); color: #000; }
                 .head-btn, .btn-back-sniff {
-                    background: transparent; border: 1px solid var(--primary); color: var(--primary);
-                    padding: 2px 6px; font-size: 10px;
+                    background: transparent; border: 1px solid var(--p); color: var(--p); padding: 2px 6px; font-size: 10px;
                 }
                 .btn-back-sniff { padding: 6px 8px; }
+                .queue-row-inline .btn { padding: 2px 6px; font-size: 9px; }
                 .queue-header-bar .btn { padding: 3px 6px; font-size: 9px; }
 
                 .sniffer-status, .queue-header-bar {
-                    padding: 4px 8px; border-top: 1px solid var(--divider);
-                    display: flex; justify-content: space-between; align-items: center;
+                    padding: 4px 8px; display: flex; justify-content: space-between; align-items: center;
                 }
-                .queue-header-bar { border-bottom: 1px solid var(--divider); border-top: 0; }
+                .sniffer-status { border-top: 1px solid var(--divider); }
+                .queue-header-bar { border-bottom: 1px solid var(--divider); }
 
                 .empty-tip { padding: 16px; text-align: center; color: #666; }
 
-                .mode-row input[type="radio"] { margin: 0; accent-color: var(--primary); }
-                .mode-row label { cursor: pointer; display: flex; align-items: center; gap: 2px; }
-                .input-row input, .filename-input {
+                input[type="text"] {
                     flex: 1; padding: 4px 6px; border: 1px solid #333; border-radius: 3px;
-                    background: var(--bg-input); color: #fff; font-size: 10px; min-width: 50px;
+                    background: #0f3460; color: #fff; font-size: 10px; min-width: 50px;
                 }
-                .filename-input { padding: 2px 4px; border-color: var(--primary); font-size: 11px; }
+                .mode-row input[type="radio"] { margin: 0; accent-color: var(--p); }
+                .mode-row label { cursor: pointer; }
                 .filename-edit {
                     cursor: pointer; border-bottom: 1px dashed var(--dim);
-                    flex: 1; white-space: normal; word-break: break-all; overflow: hidden;
+                    flex: 1; word-break: break-all; overflow: hidden; margin: 4px;
                 }
-                .filename-edit:hover { color: var(--primary); }
-                .dup-tip { color: #ff9800; font-size: 10px; margin-top: 4px; min-height: 14px; }
+                .filename-edit:hover { color: var(--p); }
+                textarea.filename-input {
+                    width: 100%; padding: 2px 4px; border: 1px solid var(--p); border-radius: 3px;
+                    background: #0f3460; color: #fff; font-size: 11px; font-family: inherit;
+                }
+                .setting-body { padding: 4px; }
+                .setting-info { padding: 0 4px; }
 
-                .queue-row { gap: 3px; }
                 .queue-row-head, .queue-row-foot { display: flex; align-items: center; gap: 6px; }
                 .queue-row-time { color: #777; font-size: 9px; flex-shrink: 0; min-width: 70px; }
-                .queue-row-name, .queue-row-info {
-                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
-                }
+                .queue-row-name, .queue-row-info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
                 .q-status { font-size: 9px; padding: 1px 5px; border-radius: 2px; font-weight: bold; flex-shrink: 0; }
                 .q-status-waiting { background: #607d8b; color: #fff; }
-                .q-status-downloading { background: var(--primary); color: #000; }
+                .q-status-downloading { background: var(--p); color: #000; }
                 .q-status-done { background: var(--info); color: #fff; }
                 .q-status-error { background: var(--danger); color: #fff; }
                 .q-status-cancelled { background: #888; color: #fff; }
@@ -1144,8 +1043,6 @@
         // ==================================
         addResource({ url, type }) {
             const normalizedType = type === 'm3u8' ? 'm3u8' : 'mp4';
-            const exists = this.resources.some(r => r.url === url);
-            if (exists) return;
             this.resources.unshift({
                 url, type: normalizedType,
                 filename: null, duration: null, segmentCount: null,
@@ -1301,15 +1198,11 @@
                 onclick: () => this.switchTab('sniffer')
             }, '返回嗅探');
 
-            addBtn.onclick = () => this.handleAddToQueue(addBtn, dupTip);
+            addBtn.onclick = () => this.handleAddToQueue(addBtn);
             btnRow.appendChild(addBtn);
             btnRow.appendChild(backBtn);
             body.appendChild(btnRow);
 
-            const dupTip = Utils.createElement('div', { class: 'dup-tip' });
-            body.appendChild(dupTip);
-
-            this.btnAddTask = addBtn;
             this.panelSetting.appendChild(body);
 
             this.bindFilenameEdit(body, item);
@@ -1370,18 +1263,12 @@
             return opt;
         }
 
-        handleAddToQueue(btn, tipEl) {
+        handleAddToQueue(btn) {
             const item = this.settingItem;
             if (!item) return;
             const opt = item.type === 'm3u8' ? this.collectDownloadOpt() : {};
             console.log('[UI] 入队:', { url: item.url, type: item.type, opt });
             const taskId = this.queue.addTask(item, opt);
-            if (taskId === -1) {
-                tipEl.textContent = '该资源已在队列中';
-                if (this.addBtnFeedbackTimer) clearTimeout(this.addBtnFeedbackTimer);
-                this.addBtnFeedbackTimer = setTimeout(() => { tipEl.textContent = ''; }, 2000);
-                return;
-            }
             btn.textContent = `已入队 #${taskId}`;
             btn.disabled = true;
             if (this.addBtnFeedbackTimer) clearTimeout(this.addBtnFeedbackTimer);
@@ -1389,7 +1276,6 @@
                 btn.textContent = '加入下载队列';
                 btn.disabled = false;
             }, 1500);
-            tipEl.textContent = '';
         }
 
         // ==================================
@@ -1436,7 +1322,7 @@
             const statusEl = Utils.createElement('span', { class: 'q-status q-status-' + task.status });
             const timeEl = Utils.createElement('span', { class: 'queue-row-time' });
             const infoEl = Utils.createElement('span', { class: 'queue-row-info' });
-            const btnsEl = Utils.createElement('span', { class: 'btn-row-inline' });
+            const btnsEl = Utils.createElement('span', { class: 'queue-row-inline' });
 
             const headRow = Utils.createElement('div', { class: 'queue-row-head' }, [nameEl, statusEl]);
             const footRow = Utils.createElement('div', { class: 'queue-row-foot' }, [timeEl, infoEl, btnsEl]);
