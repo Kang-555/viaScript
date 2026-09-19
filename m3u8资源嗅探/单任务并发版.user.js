@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       M3U8嗅探下载器
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      2.0
 // @description  网页m3u8/mp4嗅探下载；多任务队列串行调度；AES-128解密；时间/分片截取；Tab切换面板
 // @author       You
 // @license      MIT
@@ -838,27 +838,426 @@
             this.resources = [];
             this.settingItem = null;
             this.currentTab = 'sniffer';
-            this.queueProxies = new Map();
-
-            this.root = null;
-            this.host = null;
-            this.shadow = null;
-            this.tabHeader = null;
-            this.tabBody = null;
-            this.panelSniffer = null;
-            this.panelSetting = null;
-            this.panelQueue = null;
             this.addBtnFeedbackTimer = null;
             this.inited = false;
 
-            Bus.on('video-found', (data) => this.addResource(data));
-            Bus.on('queue:task-added', (task) => this.handleTaskAdded(task));
-            Bus.on('queue:task-start', (task) => this.handleTaskStatus(task));
-            Bus.on('queue:task-progress', (task) => this.handleTaskProgress(task));
-            Bus.on('queue:task-done', (task) => this.handleTaskStatus(task));
-            Bus.on('queue:task-error', (task) => this.handleTaskStatus(task));
-            Bus.on('queue:task-cancelled', (task) => this.handleTaskStatus(task));
-            Bus.on('queue:task-removed', (taskId) => this.handleTaskRemoved(taskId));
+            this.$ = {
+                host: null, shadow: null, root: null,
+                tabHeader: null, tabBody: null,
+                panelSniffer: null, panelSetting: null, panelQueue: null
+            };
+
+            const ui = this;
+
+            this.snifferTab = {
+                dom: { listEl: null, emptyTip: null, statusBar: null, topBtn: null },
+                resourceDomMap: new Map(),
+
+                ensurePanel() {
+                    const p = ui.$.panelSniffer;
+                    if (this.dom.listEl) return;
+
+                    const topBar = Utils.createElement('div', {
+                        class: 'queue-header-bar', style: 'justify-content:flex-end;'
+                    }, [
+                        Utils.createElement('button', { class: 'head-btn' }, ui.sniffer.paused ? '继续嗅探' : '停止嗅探')
+                    ]);
+                    p.appendChild(topBar);
+                    this.dom.topBtn = topBar.querySelector('.head-btn');
+
+                    this.dom.listEl = Utils.createElement('div', { class: 'sniffer-list' });
+                    this.dom.emptyTip = Utils.createElement('div', { class: 'empty-tip' }, '等待嗅探视频资源...');
+                    this.dom.listEl.appendChild(this.dom.emptyTip);
+                    p.appendChild(this.dom.listEl);
+
+                    this.dom.statusBar = Utils.createElement('div', { class: 'sniffer-status' }, '');
+                    p.appendChild(this.dom.statusBar);
+
+                    this.dom.listEl.addEventListener('click', (e) => {
+                        const btn = e.target.closest('button');
+                        if (!btn) return;
+                        const row = btn.closest('.sniffer-item');
+                        if (!row) return;
+                        const item = ui.resources.find(r => r.url === row.dataset.rid);
+                        if (!item) return;
+                        if (btn.classList.contains('btn-copy')) {
+                            Utils.copyToClipboard(item.url).then(() => alert('已复制')).catch(() => alert('复制失败'));
+                        } else if (btn.classList.contains('btn-select')) {
+                            ui.selectResource(item);
+                        }
+                    });
+                    this.dom.topBtn.addEventListener('click', () => {
+                        ui.sniffer.paused ? ui.sniffer.resume() : ui.sniffer.pause();
+                        this.dom.topBtn.textContent = ui.sniffer.paused ? '继续嗅探' : '停止嗅探';
+                        this.updateStatus();
+                    });
+
+                    for (const item of ui.resources) {
+                        this.dom.listEl.appendChild(this.createRow(item));
+                    }
+                    this.dom.emptyTip.style.display = ui.resources.length ? 'none' : 'block';
+                    this.updateStatus();
+                },
+
+                render() {
+                    this.ensurePanel();
+                    this.dom.topBtn.textContent = ui.sniffer.paused ? '继续嗅探' : '停止嗅探';
+                    this.updateStatus();
+                },
+
+                createRow(item) {
+                    const row = Utils.createElement('div', { class: 'sniffer-item' });
+                    row.appendChild(Utils.createElement('span', {
+                        class: 'item-type' + (item.type === 'mp4' ? ' mp4' : '')
+                    }, item.type.toUpperCase()));
+                    row.appendChild(Utils.createElement('div', { class: 'item-name' }, Utils.getFilename(item.url)));
+                    row.appendChild(Utils.createElement('div', { class: 'item-info' }, ''));
+                    row.appendChild(Utils.createElement('div', { class: 'item-btns' }, [
+                        Utils.createElement('button', { class: 'btn btn-copy' }, '复制'),
+                        Utils.createElement('button', { class: 'btn btn-select' }, '选择')
+                    ]));
+                    row.dataset.rid = item.url;
+                    this.resourceDomMap.set(item, row);
+                    this.updateRow(row, item);
+                    return row;
+                },
+
+                updateRow(rowEl, item) {
+                    const parts = [];
+                    if (item.duration !== null) parts.push(Utils.formatTime(item.duration));
+                    if (item.segmentCount !== null) parts.push(item.segmentCount + '片');
+                    if (item.encrypted) parts.push('AES');
+                    else if (item.segmentCount !== null) parts.push('未加密');
+                    rowEl.querySelector('.item-info').textContent = parts.join(' | ');
+                },
+
+                updateStatus() {
+                    if (!this.dom.statusBar) return;
+                    this.dom.statusBar.textContent =
+                        `共${ui.resources.length}个资源 | ${ui.sniffer.paused ? '已停止嗅探' : '嗅探中...'}`;
+                },
+
+                addResource({ url, type }) {
+                    const normalizedType = type === 'm3u8' ? 'm3u8' : 'mp4';
+                    const item = {
+                        url, type: normalizedType,
+                        filename: null, duration: null, segmentCount: null,
+                        encrypted: false, parseStatus: 'pending'
+                    };
+                    ui.resources.unshift(item);
+                    if (this.dom.listEl) {
+                        this.dom.emptyTip.style.display = 'none';
+                        this.dom.listEl.prepend(this.createRow(item));
+                        if (item.type === 'm3u8') {
+                            item.parseStatus = 'parsing';
+                            ui.parseResourceInfo(item);
+                        }
+                        this.updateStatus();
+                    } else {
+                        this.ensurePanel();
+                    }
+                }
+            };
+
+            this.setting = {
+                dom: {
+                    root: null, filenameEl: null, infoEl: null, m3u8Wrap: null,
+                    modeTime: null, modeSeg: null,
+                    timeStart: null, timeEnd: null, segStart: null, segEnd: null
+                },
+
+                ensurePanel() {
+                    const p = ui.$.panelSetting;
+                    if (this.dom.root) return;
+
+                    const body = Utils.createElement('div', { class: 'setting-body' });
+
+                    this.dom.filenameEl = Utils.createElement('div', { class: 'filename-edit' }, '');
+                    body.appendChild(this.dom.filenameEl);
+
+                    this.dom.infoEl = Utils.createElement('div', { class: 'setting-info' }, '');
+                    body.appendChild(this.dom.infoEl);
+
+                    const m3u8Wrap = Utils.createElement('div', { class: 'setting-m3u8' });
+                    m3u8Wrap.appendChild(Utils.createElement('div', { class: 'setting-info', style: 'margin-top:6px;' }, '── 下载范围 ──'));
+
+                    const timeRow = Utils.createElement('div', { class: 'mode-row' }, [
+                        Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'time', id: 'modeTime', checked: 'true' }),
+                        Utils.createElement('label', { for: 'modeTime' }, '时间'),
+                        Utils.createElement('input', { id: 'timeStart', type: 'text', inputmode: 'numeric', pattern: '\\d*', placeholder: '000000', style: 'width:70px;' }),
+                        Utils.createElement('span', { style: 'color:#aaa;' }, '-'),
+                        Utils.createElement('input', { id: 'timeEnd', type: 'text', inputmode: 'numeric', pattern: '\\d*', placeholder: '000000', style: 'width:70px;' })
+                    ]);
+                    m3u8Wrap.appendChild(timeRow);
+
+                    const segRow = Utils.createElement('div', { class: 'mode-row' }, [
+                        Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'seg', id: 'modeSeg' }),
+                        Utils.createElement('label', { for: 'modeSeg' }, '切片'),
+                        Utils.createElement('input', { id: 'segStart', type: 'text', inputmode: 'numeric', pattern: '\\d*', value: '0', placeholder: '起始', style: 'width:50px;', disabled: 'true' }),
+                        Utils.createElement('span', { style: 'color:#aaa;' }, '-'),
+                        Utils.createElement('input', { id: 'segEnd', type: 'text', inputmode: 'numeric', pattern: '\\d*', placeholder: '结束', style: 'width:50px;', disabled: 'true' })
+                    ]);
+                    m3u8Wrap.appendChild(segRow);
+
+                    this.dom.modeTime = timeRow.querySelector('#modeTime');
+                    this.dom.modeSeg = segRow.querySelector('#modeSeg');
+                    this.dom.timeStart = timeRow.querySelector('#timeStart');
+                    this.dom.timeEnd = timeRow.querySelector('#timeEnd');
+                    this.dom.segStart = segRow.querySelector('#segStart');
+                    this.dom.segEnd = segRow.querySelector('#segEnd');
+
+                    const handleModeSwitch = () => {
+                        const isTime = this.dom.modeTime.checked;
+                        [this.dom.timeStart, this.dom.timeEnd].forEach(i => i.disabled = !isTime);
+                        [this.dom.segStart, this.dom.segEnd].forEach(i => i.disabled = isTime);
+                    };
+                    this.dom.modeTime.onclick = handleModeSwitch;
+                    this.dom.modeSeg.onclick = handleModeSwitch;
+
+                    body.appendChild(m3u8Wrap);
+
+                    const btnRow = Utils.createElement('div', { class: 'btn-row' });
+                    const addBtn = Utils.createElement('button', { class: 'btn-queue-add' }, '加入下载队列');
+                    addBtn.onclick = () => this.addToQueue(addBtn);
+                    btnRow.appendChild(addBtn);
+                    btnRow.appendChild(Utils.createElement('button', { class: 'btn-back-sniff', onclick: () => ui.switchTab('sniffer') }, '返回嗅探'));
+                    body.appendChild(btnRow);
+
+                    p.appendChild(body);
+                    this.dom.root = body;
+                    this.dom.m3u8Wrap = m3u8Wrap;
+                },
+
+                render() {
+                    this.ensurePanel();
+                    const p = ui.$.panelSetting;
+                    if (!ui.settingItem) {
+                        p.innerHTML = '<div class="empty-tip">请先在嗅探面板选择一个资源</div>';
+                        this.dom.root.style.display = 'none';
+                        return;
+                    }
+                    if (p.querySelector('.empty-tip')) p.innerHTML = '';
+                    this.dom.root.style.display = '';
+
+                    const item = ui.settingItem;
+                    this.dom.filenameEl.textContent = item.filename || Utils.getFilename(item.url);
+
+                    const infoParts = [];
+                    infoParts.push(item.type === 'm3u8' ? '类型: M3U8' : '类型: MP4');
+                    if (item.duration !== null) infoParts.push('时长: ' + Utils.formatTime(item.duration));
+                    if (item.segmentCount !== null) infoParts.push('分片: ' + item.segmentCount);
+                    if (item.encrypted) infoParts.push('AES加密');
+                    else if (item.segmentCount !== null) infoParts.push('未加密');
+                    this.dom.infoEl.textContent = infoParts.join(' | ');
+
+                    const isM3u8 = item.type === 'm3u8';
+                    this.dom.m3u8Wrap.style.display = isM3u8 ? '' : 'none';
+                    if (isM3u8) {
+                        const ts = item.duration !== null ? Utils.formatTimeInput(0) : '';
+                        const te = item.duration !== null ? Utils.formatTimeInput(item.duration) : '';
+                        this.dom.timeStart.value = ts;
+                        this.dom.timeEnd.value = te;
+                        this.dom.segStart.value = '0';
+                        this.dom.segEnd.value = item.segmentCount !== null ? String(item.segmentCount - 1) : '';
+                        this.dom.modeTime.checked = true;
+                        this.dom.modeTime.onclick?.();
+                    }
+
+                    this.bindFilenameEdit(this.dom.filenameEl, item);
+                },
+
+                bindFilenameEdit(nameSpan, item) {
+                    if (!nameSpan || nameSpan.classList.contains('filename-input')) return;
+                    nameSpan.onclick = () => {
+                        const input = document.createElement('textarea');
+                        input.className = 'filename-input';
+                        input.value = item.filename || Utils.getFilename(item.url);
+                        input.rows = 1;
+                        input.addEventListener('input', () => {
+                            input.style.height = 'auto';
+                            input.style.height = input.scrollHeight + 'px';
+                        });
+                        input.onkeydown = (e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); input.blur(); }
+                        };
+                        input.onblur = () => {
+                            item.filename = input.value.trim() || Utils.getFilename(item.url);
+                            nameSpan.textContent = item.filename;
+                            input.replaceWith(nameSpan);
+                            this.dom.filenameEl = nameSpan;
+                        };
+                        nameSpan.replaceWith(input);
+                        this.dom.filenameEl = input;
+                        input.focus(); input.select();
+                        input.style.height = 'auto';
+                        input.style.height = input.scrollHeight + 'px';
+                    };
+                },
+
+                collectOpt() {
+                    const opt = {};
+                    const modeEl = this.dom.root?.querySelector('input[name="dlMode"]:checked');
+                    const mode = modeEl ? modeEl.value : 'time';
+                    if (mode === 'seg') {
+                        const segStart = this.dom.segStart?.value;
+                        const segEnd = this.dom.segEnd?.value;
+                        if (segStart !== '' && segEnd !== '') {
+                            opt.startIdx = parseInt(segStart);
+                            opt.endIdx = parseInt(segEnd);
+                        }
+                    } else {
+                        const timeStart = this.dom.timeStart?.value;
+                        const timeEnd = this.dom.timeEnd?.value;
+                        if (timeStart && timeEnd) {
+                            opt.beginSec = Utils.parseTimeInput(timeStart);
+                            opt.endSec = Utils.parseTimeInput(timeEnd);
+                        }
+                    }
+                    return opt;
+                },
+
+                addToQueue(btn) {
+                    const item = ui.settingItem;
+                    if (!item) return;
+                    const opt = item.type === 'm3u8' ? this.collectOpt() : {};
+                    console.log('[UI] 入队:', { url: item.url, type: item.type, opt });
+                    const taskId = ui.queue.addTask(item, opt);
+                    btn.textContent = `已入队 #${taskId}`;
+                    btn.disabled = true;
+                    if (ui.addBtnFeedbackTimer) clearTimeout(ui.addBtnFeedbackTimer);
+                    ui.addBtnFeedbackTimer = setTimeout(() => {
+                        btn.textContent = '加入下载队列';
+                        btn.disabled = false;
+                    }, 1500);
+                }
+            };
+
+            this.queueUI = {
+                dom: { listEl: null, headerSpan: null },
+                proxies: new Map(),
+
+                ensurePanel() {
+                    const p = ui.$.panelQueue;
+                    if (this.dom.listEl) return;
+
+                    const headerBar = Utils.createElement('div', { class: 'queue-header-bar' }, [
+                        Utils.createElement('span', {}),
+                        Utils.createElement('button', {
+                            class: 'btn btn-clear-all',
+                            onclick: () => {
+                                ui.queue.clearCompleted();
+                                this.render();
+                            }
+                        }, '全部移除')
+                    ]);
+                    this.dom.headerSpan = headerBar.querySelector('span');
+                    p.appendChild(headerBar);
+
+                    this.dom.listEl = Utils.createElement('div', { class: 'queue-list' });
+                    p.appendChild(this.dom.listEl);
+                },
+
+                render() {
+                    this.ensurePanel();
+                    const existingIds = new Set([...this.dom.listEl.querySelectorAll('.queue-row')].map(r => +r.dataset.tid));
+                    const allTasks = [...ui.queue.tasks.values()].sort((a, b) => a.id - b.id);
+
+                    for (const task of allTasks) {
+                        if (!existingIds.has(task.id)) {
+                            this.createRow(task);
+                        } else if (!this.proxies.has(task.id)) {
+                            const rowEl = this.dom.listEl.querySelector(`.queue-row[data-tid="${task.id}"]`);
+                            if (rowEl) this.rebindRow(task, rowEl);
+                        }
+                    }
+                    if (allTasks.length === 0) {
+                        if (!this.dom.listEl.querySelector('.empty-tip')) {
+                            this.dom.listEl.innerHTML = '<div class="empty-tip">队列为空</div>';
+                        }
+                    } else {
+                        const tip = this.dom.listEl.querySelector('.empty-tip');
+                        if (tip) tip.remove();
+                    }
+                    this.updateHeader();
+                },
+
+                updateHeader() {
+                    if (!this.dom.headerSpan) return;
+                    this.dom.headerSpan.textContent =
+                        `队列: ${ui.queue.counts.total} | 下载中 ${ui.queue.counts.downloading} | 等待 ${ui.queue.counts.waiting}`;
+                },
+
+                createRow(task) {
+                    const rowEl = Utils.createElement('div', { class: 'queue-row' });
+                    rowEl.dataset.tid = task.id;
+                    const nameEl = Utils.createElement('span', { class: 'queue-row-name' }, task.item.filename || Utils.getFilename(task.item.url));
+                    const statusEl = Utils.createElement('span', { class: 'q-status q-status-' + task.status });
+                    const timeEl = Utils.createElement('span', { class: 'queue-row-time' });
+                    const infoEl = Utils.createElement('span', { class: 'queue-row-info' });
+                    const btnsEl = Utils.createElement('span', { class: 'queue-row-inline' });
+
+                    rowEl.appendChild(Utils.createElement('div', { class: 'queue-row-head' }, [nameEl, statusEl]));
+                    rowEl.appendChild(Utils.createElement('div', { class: 'queue-row-foot' }, [timeEl, infoEl, btnsEl]));
+                    this.dom.listEl.appendChild(rowEl);
+
+                    const proxy = new UIProxy(task.id, rowEl, statusEl, timeEl, infoEl, btnsEl, ui.queue);
+                    proxy.updateStatus(task);
+                    if (task.progress.text) proxy.updateProgress(task);
+                    this.proxies.set(task.id, proxy);
+                },
+
+                rebindRow(task, rowEl) {
+                    const statusEl = rowEl.querySelector('.q-status');
+                    const timeEl = rowEl.querySelector('.queue-row-time');
+                    const infoEl = rowEl.querySelector('.queue-row-info');
+                    const btnsEl = rowEl.querySelector('.queue-row-inline');
+                    const proxy = new UIProxy(task.id, rowEl, statusEl, timeEl, infoEl, btnsEl, ui.queue);
+                    proxy.updateStatus(task);
+                    if (task.progress.text) proxy.updateProgress(task);
+                    this.proxies.set(task.id, proxy);
+                },
+
+                onAdded(task) {
+                    if (!this.dom.listEl) { this.ensurePanel(); this.render(); return; }
+                    if (!this.dom.listEl.querySelector(`.queue-row[data-tid="${task.id}"]`)) {
+                        this.createRow(task);
+                        const tip = this.dom.listEl.querySelector('.empty-tip');
+                        if (tip) tip.remove();
+                    }
+                    this.updateHeader();
+                },
+
+                onStatus(task) {
+                    const proxy = this.proxies.get(task.id);
+                    if (proxy) proxy.updateStatus(task);
+                    this.updateHeader();
+                },
+
+                onProgress(task) {
+                    const proxy = this.proxies.get(task.id);
+                    if (proxy) proxy.updateProgress(task);
+                },
+
+                onRemoved(taskId) {
+                    const proxy = this.proxies.get(taskId);
+                    if (proxy) {
+                        proxy.destroy();
+                        this.proxies.delete(taskId);
+                    }
+                    const row = this.dom.listEl?.querySelector(`.queue-row[data-tid="${taskId}"]`);
+                    if (row) row.remove();
+                    this.updateHeader();
+                }
+            };
+
+            Bus.on('video-found', d => this.snifferTab.addResource(d));
+            Bus.on('queue:task-added', t => this.queueUI.onAdded(t));
+            Bus.on('queue:task-start', t => this.queueUI.onStatus(t));
+            Bus.on('queue:task-progress', t => this.queueUI.onProgress(t));
+            Bus.on('queue:task-done', t => this.queueUI.onStatus(t));
+            Bus.on('queue:task-error', t => this.queueUI.onStatus(t));
+            Bus.on('queue:task-cancelled', t => this.queueUI.onStatus(t));
+            Bus.on('queue:task-removed', id => this.queueUI.onRemoved(id));
         }
 
         async init() {
@@ -866,53 +1265,52 @@
             await waitBody();
             if (document.getElementById(Config.uiId)) return;
 
-            this.host = Utils.createElement('div', {
+            const host = Utils.createElement('div', {
                 id: Config.uiId,
                 style: { position: 'fixed', bottom: 'calc(3px + env(safe-area-inset-bottom))', left: '10px', zIndex: 999999 }
             });
+            this.$.host = host;
 
             try {
-                this.shadow = this.host.attachShadow({ mode: 'open' });
+                this.$.shadow = host.attachShadow({ mode: 'open' });
             } catch (e) {
-                this.shadow = this.host;
+                this.$.shadow = host;
             }
 
             const style = Utils.createElement('style');
             style.textContent = this.buildStyles();
-            this.shadow.appendChild(style);
+            this.$.shadow.appendChild(style);
 
-            this.root = Utils.createElement('div', { class: 'main-panel' });
+            this.$.root = Utils.createElement('div', { class: 'main-panel' });
 
-            // tab header
-            this.tabHeader = Utils.createElement('div', { class: 'tab-header' }, [
+            this.$.tabHeader = Utils.createElement('div', { class: 'tab-header' }, [
                 Utils.createElement('button', { class: 'tab-btn active', 'data-tab': 'sniffer' }, '嗅探资源'),
                 Utils.createElement('button', { class: 'tab-btn', 'data-tab': 'download-setting' }, '下载配置'),
                 Utils.createElement('button', { class: 'tab-btn', 'data-tab': 'queue' }, '下载队列'),
                 Utils.createElement('span', { class: 'close-btn', title: '收起' }, '×')
             ]);
-            this.tabHeader.querySelectorAll('.tab-btn').forEach(btn => {
+            this.$.tabHeader.querySelectorAll('.tab-btn').forEach(btn => {
                 btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
             });
-            this.tabHeader.querySelector('.close-btn').addEventListener('click', () => {
-                this.host.style.display = (this.host.style.display === 'none') ? '' : 'none';
+            this.$.tabHeader.querySelector('.close-btn').addEventListener('click', () => {
+                host.style.display = (host.style.display === 'none') ? '' : 'none';
             });
-            this.root.appendChild(this.tabHeader);
+            this.$.root.appendChild(this.$.tabHeader);
 
-            // tab body
-            this.tabBody = Utils.createElement('div', { class: 'tab-body' });
-            this.panelSniffer = Utils.createElement('div', { class: 'tab-panel active', 'data-panel': 'sniffer' });
-            this.panelSetting = Utils.createElement('div', { class: 'tab-panel', 'data-panel': 'download-setting' });
-            this.panelQueue = Utils.createElement('div', { class: 'tab-panel', 'data-panel': 'queue' });
-            this.tabBody.appendChild(this.panelSniffer);
-            this.tabBody.appendChild(this.panelSetting);
-            this.tabBody.appendChild(this.panelQueue);
-            this.root.appendChild(this.tabBody);
+            this.$.tabBody = Utils.createElement('div', { class: 'tab-body' });
+            this.$.panelSniffer = Utils.createElement('div', { class: 'tab-panel active', 'data-panel': 'sniffer' });
+            this.$.panelSetting = Utils.createElement('div', { class: 'tab-panel', 'data-panel': 'download-setting' });
+            this.$.panelQueue = Utils.createElement('div', { class: 'tab-panel', 'data-panel': 'queue' });
+            this.$.tabBody.appendChild(this.$.panelSniffer);
+            this.$.tabBody.appendChild(this.$.panelSetting);
+            this.$.tabBody.appendChild(this.$.panelQueue);
+            this.$.root.appendChild(this.$.tabBody);
 
-            this.shadow.appendChild(this.root);
-            document.body.appendChild(this.host);
+            this.$.shadow.appendChild(this.$.root);
+            document.body.appendChild(host);
 
             this.inited = true;
-            this.renderSnifferTab();
+            this.snifferTab.ensurePanel();
         }
 
         buildStyles() {
@@ -1020,96 +1418,17 @@
             `;
         }
 
-        // ==================================
-        // Tab 切换
-        // ==================================
         switchTab(name) {
             if (this.currentTab === name) return;
             this.currentTab = name;
 
-            this.tabHeader.querySelectorAll('.tab-btn').forEach(b => {
-                b.classList.toggle('active', b.dataset.tab === name);
-            });
-            this.tabBody.querySelectorAll('.tab-panel').forEach(p => {
-                p.classList.toggle('active', p.dataset.panel === name);
-            });
+            this.$.tabHeader.querySelectorAll('.tab-btn').forEach(b =>
+                b.classList.toggle('active', b.dataset.tab === name));
+            this.$.tabBody.querySelectorAll('.tab-panel').forEach(p =>
+                p.classList.toggle('active', p.dataset.panel === name));
 
-            if (name === 'download-setting') this.refreshDownloadSettingTab();
-            if (name === 'queue') this.renderQueueTab();
-        }
-
-        // ==================================
-        // Tab1 嗅探
-        // ==================================
-        addResource({ url, type }) {
-            const normalizedType = type === 'm3u8' ? 'm3u8' : 'mp4';
-            this.resources.unshift({
-                url, type: normalizedType,
-                filename: null, duration: null, segmentCount: null,
-                encrypted: false, parseStatus: 'pending'
-            });
-            if (this.inited && this.currentTab === 'sniffer') this.renderSnifferTab();
-        }
-
-        renderSnifferTab() {
-            this.panelSniffer.innerHTML = '';
-
-            const topBar = Utils.createElement('div', {
-                class: 'queue-header-bar',
-                style: 'justify-content: flex-end;'
-            }, [
-                Utils.createElement('button', {
-                    class: 'head-btn',
-                    onclick: () => {
-                        if (this.sniffer.paused) this.sniffer.resume(); else this.sniffer.pause();
-                        this.renderSnifferTab();
-                    }
-                }, this.sniffer.paused ? '继续嗅探' : '停止嗅探')
-            ]);
-            this.panelSniffer.appendChild(topBar);
-
-            const listEl = Utils.createElement('div', { class: 'sniffer-list' });
-            if (this.resources.length === 0) {
-                listEl.innerHTML = '<div class="empty-tip">等待嗅探视频资源...</div>';
-            } else {
-                this.resources.forEach((item) => {
-                    const row = Utils.createElement('div', { class: 'sniffer-item' });
-                    row.appendChild(Utils.createElement('span', {
-                        class: 'item-type' + (item.type === 'mp4' ? ' mp4' : '')
-                    }, item.type.toUpperCase()));
-                    row.appendChild(Utils.createElement('div', { class: 'item-name' }, Utils.getFilename(item.url)));
-
-                    const infoParts = [];
-                    if (item.duration !== null) infoParts.push(Utils.formatTime(item.duration));
-                    if (item.segmentCount !== null) infoParts.push(item.segmentCount + '片');
-                    if (item.encrypted) infoParts.push('AES');
-                    else if (item.segmentCount !== null) infoParts.push('未加密');
-                    row.appendChild(Utils.createElement('div', { class: 'item-info' }, infoParts.join(' | ')));
-
-                    const btns = Utils.createElement('div', { class: 'item-btns' }, [
-                        Utils.createElement('button', {
-                            class: 'btn btn-copy',
-                            onclick: (e) => { e.stopPropagation(); Utils.copyToClipboard(item.url).then(() => alert('已复制')).catch(() => alert('复制失败')); }
-                        }, '复制'),
-                        Utils.createElement('button', {
-                            class: 'btn btn-select',
-                            onclick: (e) => { e.stopPropagation(); this.selectResource(item); }
-                        }, '选择')
-                    ]);
-                    row.appendChild(btns);
-                    listEl.appendChild(row);
-
-                    if (item.type === 'm3u8' && item.parseStatus === 'pending') {
-                        item.parseStatus = 'parsing';
-                        this.parseResourceInfo(item);
-                    }
-                });
-            }
-            this.panelSniffer.appendChild(listEl);
-
-            const statusBar = Utils.createElement('div', { class: 'sniffer-status' },
-                `共${this.resources.length}个资源 | ${this.sniffer.paused ? '已停止嗅探' : '嗅探中...'}`);
-            this.panelSniffer.appendChild(statusBar);
+            const map = { 'sniffer': 'snifferTab', 'download-setting': 'setting', 'queue': 'queueUI' };
+            this[map[name]].render();
         }
 
         async parseResourceInfo(item) {
@@ -1119,249 +1438,17 @@
                 item.segmentCount = parseResult.segments.length;
                 item.encrypted = parseResult.segments.some(s => s.key);
                 item.parseStatus = 'done';
-                if (this.currentTab === 'sniffer') this.renderSnifferTab();
             } catch (e) {
                 console.warn('[解析失败]', item.url, e.message);
                 item.parseStatus = 'error';
             }
+            const rowEl = this.snifferTab.resourceDomMap.get(item);
+            if (rowEl) this.snifferTab.updateRow(rowEl, item);
         }
 
         selectResource(item) {
             this.settingItem = item;
             this.switchTab('download-setting');
-        }
-
-        // ==================================
-        // Tab2 下载配置
-        // ==================================
-        renderDownloadSettingTab() {
-            this.panelSetting.innerHTML = '';
-            if (!this.settingItem) {
-                this.panelSetting.innerHTML = '<div class="empty-tip">请先在嗅探面板选择一个资源</div>';
-                return;
-            }
-
-            const item = this.settingItem;
-            const body = Utils.createElement('div', { class: 'setting-body' });
-
-            const filename = item.filename || Utils.getFilename(item.url);
-            body.appendChild(Utils.createElement('div', { class: 'filename-edit' }, filename));
-
-            const infoParts = [];
-            if (item.type === 'm3u8') infoParts.push('类型: M3U8');
-            else infoParts.push('类型: MP4');
-            if (item.duration !== null) infoParts.push('时长: ' + Utils.formatTime(item.duration));
-            if (item.segmentCount !== null) infoParts.push('分片: ' + item.segmentCount);
-            if (item.encrypted) infoParts.push('AES加密');
-            else if (item.segmentCount !== null) infoParts.push('未加密');
-            body.appendChild(Utils.createElement('div', { class: 'setting-info' }, infoParts.join(' | ')));
-
-            if (item.type === 'm3u8') {
-                body.appendChild(Utils.createElement('div', { class: 'setting-info', style: 'margin-top: 6px;' }, '── 下载范围 ──'));
-
-                const timeStartVal = item.duration !== null ? Utils.formatTimeInput(0) : '';
-                const timeEndVal = item.duration !== null ? Utils.formatTimeInput(item.duration) : '';
-
-                const timeRow = Utils.createElement('div', { class: 'mode-row' }, [
-                    Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'time', id: 'modeTime', checked: 'true' }),
-                    Utils.createElement('label', { for: 'modeTime' }, '时间'),
-                    Utils.createElement('input', { id: 'timeStart', type: 'text', inputmode: 'numeric', pattern: '\\d*', value: timeStartVal, placeholder: '000000', style: 'width: 70px;' }),
-                    Utils.createElement('span', { style: 'color: #aaa;' }, '-'),
-                    Utils.createElement('input', { id: 'timeEnd', type: 'text', inputmode: 'numeric', pattern: '\\d*', value: timeEndVal, placeholder: '000000', style: 'width: 70px;' })
-                ]);
-                body.appendChild(timeRow);
-
-                const segRow = Utils.createElement('div', { class: 'mode-row' }, [
-                    Utils.createElement('input', { type: 'radio', name: 'dlMode', value: 'seg', id: 'modeSeg' }),
-                    Utils.createElement('label', { for: 'modeSeg' }, '切片'),
-                    Utils.createElement('input', { id: 'segStart', type: 'text', inputmode: 'numeric', pattern: '\\d*', value: '0', placeholder: '起始', style: 'width: 50px;', disabled: 'true' }),
-                    Utils.createElement('span', { style: 'color: #aaa;' }, '-'),
-                    Utils.createElement('input', { id: 'segEnd', type: 'text', inputmode: 'numeric', pattern: '\\d*', value: item.segmentCount !== null ? String(item.segmentCount - 1) : '', placeholder: '结束', style: 'width: 50px;', disabled: 'true' })
-                ]);
-                body.appendChild(segRow);
-
-                const timeRadio = timeRow.querySelector('#modeTime');
-                const segRadio = segRow.querySelector('#modeSeg');
-                const handleModeSwitch = () => {
-                    const isTime = timeRadio.checked;
-                    timeRow.querySelectorAll('input[type="text"]').forEach(i => i.disabled = !isTime);
-                    segRow.querySelectorAll('input[type="text"]').forEach(i => i.disabled = isTime);
-                };
-                timeRadio.onclick = handleModeSwitch;
-                segRadio.onclick = handleModeSwitch;
-            }
-
-            const btnRow = Utils.createElement('div', { class: 'btn-row' });
-            const addBtn = Utils.createElement('button', { class: 'btn-queue-add' }, '加入下载队列');
-            const backBtn = Utils.createElement('button', {
-                class: 'btn-back-sniff',
-                onclick: () => this.switchTab('sniffer')
-            }, '返回嗅探');
-
-            addBtn.onclick = () => this.handleAddToQueue(addBtn);
-            btnRow.appendChild(addBtn);
-            btnRow.appendChild(backBtn);
-            body.appendChild(btnRow);
-
-            this.panelSetting.appendChild(body);
-
-            this.bindFilenameEdit(body, item);
-        }
-
-        bindFilenameEdit(body, item) {
-            const nameSpan = body.querySelector('.filename-edit');
-            if (!nameSpan) return;
-            nameSpan.onclick = () => {
-                const input = document.createElement('textarea');
-                input.className = 'filename-input';
-                input.value = item.filename || Utils.getFilename(item.url);
-                input.rows = 1;
-                input.addEventListener('input', () => {
-                    input.style.height = 'auto';
-                    input.style.height = input.scrollHeight + 'px';
-                });
-                input.onkeydown = (e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); input.blur(); }
-                };
-                input.onblur = () => {
-                    item.filename = input.value.trim() || Utils.getFilename(item.url);
-                    nameSpan.textContent = item.filename;
-                    input.replaceWith(nameSpan);
-                };
-                nameSpan.replaceWith(input);
-                input.focus(); input.select();
-                input.style.height = 'auto';
-                input.style.height = input.scrollHeight + 'px';
-            };
-        }
-
-        refreshDownloadSettingTab() {
-            if (this.currentTab === 'download-setting' && this.settingItem) {
-                this.renderDownloadSettingTab();
-            }
-        }
-
-        collectDownloadOpt() {
-            const opt = {};
-            const modeEl = this.panelSetting.querySelector('input[name="dlMode"]:checked');
-            const mode = modeEl ? modeEl.value : 'time';
-            if (mode === 'seg') {
-                const segStart = this.panelSetting.querySelector('#segStart')?.value;
-                const segEnd = this.panelSetting.querySelector('#segEnd')?.value;
-                if (segStart !== '' && segEnd !== '') {
-                    opt.startIdx = parseInt(segStart);
-                    opt.endIdx = parseInt(segEnd);
-                }
-            } else {
-                const timeStart = this.panelSetting.querySelector('#timeStart')?.value;
-                const timeEnd = this.panelSetting.querySelector('#timeEnd')?.value;
-                if (timeStart && timeEnd) {
-                    opt.beginSec = Utils.parseTimeInput(timeStart);
-                    opt.endSec = Utils.parseTimeInput(timeEnd);
-                }
-            }
-            return opt;
-        }
-
-        handleAddToQueue(btn) {
-            const item = this.settingItem;
-            if (!item) return;
-            const opt = item.type === 'm3u8' ? this.collectDownloadOpt() : {};
-            console.log('[UI] 入队:', { url: item.url, type: item.type, opt });
-            const taskId = this.queue.addTask(item, opt);
-            btn.textContent = `已入队 #${taskId}`;
-            btn.disabled = true;
-            if (this.addBtnFeedbackTimer) clearTimeout(this.addBtnFeedbackTimer);
-            this.addBtnFeedbackTimer = setTimeout(() => {
-                btn.textContent = '加入下载队列';
-                btn.disabled = false;
-            }, 1500);
-        }
-
-        // ==================================
-        // Tab3 队列
-        // ==================================
-        renderQueueTab() {
-            this.queueProxies.clear();
-            this.panelQueue.innerHTML = '';
-
-            const headerBar = Utils.createElement('div', { class: 'queue-header-bar' }, [
-                Utils.createElement('span', {}, `队列: ${this.queue.counts.total} | 下载中 ${this.queue.counts.downloading} | 等待 ${this.queue.counts.waiting}`),
-                Utils.createElement('button', {
-                    class: 'btn btn-clear-all',
-                    onclick: () => {
-                        this.queue.clearCompleted();
-                        this.refreshQueueTab();
-                    }
-                }, '全部移除')
-            ]);
-            this.panelQueue.appendChild(headerBar);
-
-            const listEl = Utils.createElement('div', { class: 'queue-list' });
-            const allTasks = [...this.queue.tasks.values()].sort((a, b) => a.id - b.id);
-
-            if (allTasks.length === 0) {
-                listEl.innerHTML = '<div class="empty-tip">队列为空</div>';
-            } else {
-                for (const task of allTasks) {
-                    this.createQueueRow(task, listEl);
-                }
-            }
-            this.panelQueue.appendChild(listEl);
-        }
-
-        refreshQueueTab() {
-            if (this.currentTab !== 'queue') return;
-            const headerBar = this.panelQueue.querySelector('.queue-header-bar span');
-            if (headerBar) headerBar.textContent = `队列: ${this.queue.counts.total} | 下载中 ${this.queue.counts.downloading} | 等待 ${this.queue.counts.waiting}`;
-        }
-
-        createQueueRow(task, parentEl) {
-            const rowEl = Utils.createElement('div', { class: 'queue-row' });
-            const nameEl = Utils.createElement('span', { class: 'queue-row-name' }, task.item.filename || Utils.getFilename(task.item.url));
-            const statusEl = Utils.createElement('span', { class: 'q-status q-status-' + task.status });
-            const timeEl = Utils.createElement('span', { class: 'queue-row-time' });
-            const infoEl = Utils.createElement('span', { class: 'queue-row-info' });
-            const btnsEl = Utils.createElement('span', { class: 'queue-row-inline' });
-
-            const headRow = Utils.createElement('div', { class: 'queue-row-head' }, [nameEl, statusEl]);
-            const footRow = Utils.createElement('div', { class: 'queue-row-foot' }, [timeEl, infoEl, btnsEl]);
-
-            rowEl.appendChild(headRow);
-            rowEl.appendChild(footRow);
-            parentEl.appendChild(rowEl);
-
-            const proxy = new UIProxy(task.id, rowEl, statusEl, timeEl, infoEl, btnsEl, this.queue);
-            proxy.updateStatus(task);
-            if (task.progress.text) proxy.updateProgress(task);
-            this.queueProxies.set(task.id, proxy);
-        }
-
-        handleTaskAdded(task) {
-            if (this.currentTab === 'queue') {
-                this.createQueueRow(task, this.panelQueue.querySelector('.queue-list') || this.panelQueue);
-            }
-            this.refreshQueueTab();
-        }
-
-        handleTaskProgress(task) {
-            const proxy = this.queueProxies.get(task.id);
-            if (proxy) proxy.updateProgress(task);
-        }
-
-        handleTaskStatus(task) {
-            const proxy = this.queueProxies.get(task.id);
-            if (proxy) proxy.updateStatus(task);
-            this.refreshQueueTab();
-        }
-
-        handleTaskRemoved(taskId) {
-            const proxy = this.queueProxies.get(taskId);
-            if (proxy) {
-                proxy.destroy();
-                this.queueProxies.delete(taskId);
-            }
-            this.refreshQueueTab();
         }
     }
 
