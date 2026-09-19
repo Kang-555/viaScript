@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       M3U8嗅探下载器 (下载队列 + Tab面板版)
 // @namespace    http://tampermonkey.net/
-// @version      4.0.3
+// @version      4.1.3
 // @description  网页m3u8/mp4嗅探下载；多任务队列串行调度；AES-128解密；时间/分片截取；Tab切换面板
 // @author       You
 // @license      MIT
@@ -29,14 +29,16 @@
         observer.observe(document.documentElement, { childList: true, subtree: true });
     });
 
+    const IS_MOBILE = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
     // ==========================================
     // 1. 全局配置
     // ==========================================
     const Config = {
         scanInterval: 2000,
         uiId: 'gm-sniffer-v2-ts',
-        isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent),
-        maxThreads: 4,
+        isMobile: IS_MOBILE,
+        maxThreads: IS_MOBILE ? 5 : 10,
         maxRetries: 3,
         retryDelay: 1000,
         chunkSize: 256 * 1024,
@@ -114,7 +116,7 @@
                     method: 'GET',
                     url: url,
                     responseType: isBinary ? 'arraybuffer' : 'text',
-                    headers: { 'Referer': location.href, 'Origin': location.origin },
+                    headers: { 'Referer': location.href },
                     timeout: 60000,
                     onprogress: (evt) => {
                         if (!onProgress || cancelled) return;
@@ -617,10 +619,10 @@
                 if (uniqueKeys.length > 0) {
                     onProgress(0, '获取加密密钥...', null);
                     if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
-                    for (const keyUrl of uniqueKeys) {
-                        const keyData = await Utils.request(keyUrl, true);
-                        keyCache.set(keyUrl, new Uint8Array(keyData));
-                    }
+                    const keyResults = await Promise.all(uniqueKeys.map(keyUrl =>
+                        Utils.request(keyUrl, true).then(data => [keyUrl, new Uint8Array(data)])
+                    ));
+                    for (const [keyUrl, keyData] of keyResults) keyCache.set(keyUrl, keyData);
                 }
                 console.log('[TaskRunner] 开始下载分片');
                 if (cancelCheck && cancelCheck()) { writer.clear(); return { cancelled: true }; }
