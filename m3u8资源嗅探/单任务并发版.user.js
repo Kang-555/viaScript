@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name       M3U8嗅探下载器 (下载队列 + Tab面板版)
+// @name       M3U8嗅探下载器
 // @namespace    http://tampermonkey.net/
-// @version      4.1.3
+// @version      1.0
 // @description  网页m3u8/mp4嗅探下载；多任务队列串行调度；AES-128解密；时间/分片截取；Tab切换面板
 // @author       You
 // @license      MIT
@@ -38,7 +38,9 @@
         scanInterval: 2000,
         uiId: 'gm-sniffer-v2-ts',
         isMobile: IS_MOBILE,
-        maxThreads: IS_MOBILE ? 5 : 10,
+        maxThreads: IS_MOBILE ? 10 : 30,
+        maxThreadsCap: IS_MOBILE ? 15 : 50,
+        adaptiveThreading: true,
         maxRetries: 3,
         retryDelay: 1000,
         chunkSize: 256 * 1024,
@@ -444,14 +446,20 @@
             workSegments = workSegments.slice(startIdx, endIdx + 1);
             if (workSegments.length === 0) throw new Error("分片范围过滤后为空");
         }
-        console.log('[downloadM3u8BySegments] 待下载分片数:', workSegments.length, '线程数:', Math.min(Config.maxThreads, workSegments.length));
+        let currentThreads = Config.maxThreads;
+        if (Config.adaptiveThreading && workSegments.length > 20) {
+            currentThreads = Math.min(15, workSegments.length);
+        }
+        console.log('[downloadM3u8BySegments] 待下载分片数:', workSegments.length, '初始线程数:', currentThreads, '上限:', Config.maxThreadsCap);
 
         let nextIndex = 0;
-        const results = new Array(workSegments.length);
+        const results = new Array(workSegments.length).fill(null);
+        let nextReadyIdx = 0;
         let completedCount = 0, failCount = 0, totalBytes = 0;
         let lastProgressUpdate = 0;
         const taskStartTs = Date.now();
         let lastSpeedReport = 0, movingSpeed = 0;
+        let appendPromise = Promise.resolve();
 
         const updateProgress = (force = false) => {
             const now = Date.now();
@@ -513,6 +521,40 @@
                     results[index] = new Uint8Array(rawData);
                 }
                 completedCount++;
+
+                if (Config.adaptiveThreading && completedCount >= 20 && completedCount % 20 === 0) {
+                    const failRate = failCount / completedCount;
+                    if (failRate > 0.3 && currentThreads > 5) {
+                        const drop = Math.min(5, currentThreads - 5);
+                        currentThreads -= drop;
+                        console.log(`[downloadM3u8BySegments] 自适应降线程: 失败率${(failRate * 100).toFixed(0)}%, ${currentThreads + drop} → ${currentThreads}`);
+                    } else if (failRate < 0.1 && currentThreads < Config.maxThreadsCap) {
+                        const add = Math.min(10, Config.maxThreadsCap - currentThreads);
+                        if (add > 0) {
+                            console.log(`[downloadM3u8BySegments] 自适应加线程: ${currentThreads} → ${currentThreads + add}`);
+                            currentThreads += add;
+                            activeWorkers += add;
+                            for (let i = 0; i < add; i++) {
+                                worker().then(onWorkerExit);
+                            }
+                        }
+                    }
+                }
+
+                appendPromise = appendPromise.then(async () => {
+                    while (nextReadyIdx < workSegments.length && results[nextReadyIdx] !== null) {
+                        if (cancelCheck && cancelCheck()) return;
+                        const segData = results[nextReadyIdx];
+                        if (segData.length > 0) {
+                            await writer.addFile('', segData);
+                        } else {
+                            console.warn(`[downloadM3u8BySegments] 跳过空分片#${nextReadyIdx}`);
+                        }
+                        results[nextReadyIdx] = null;
+                        nextReadyIdx++;
+                    }
+                });
+
                 const now = Date.now();
                 if (now - lastSpeedReport >= 500) {
                     const elapsed = (now - taskStartTs) / 1000;
@@ -523,25 +565,25 @@
             }
         };
 
-        const threads = Array(Math.min(Config.maxThreads, workSegments.length)).fill(null).map(() => worker());
-        await Promise.all(threads);
+        let activeWorkers = 0;
+        let allWorkersDone = null;
+        const workerCompletion = new Promise(resolve => { allWorkersDone = resolve; });
+        const onWorkerExit = () => { activeWorkers--; if (activeWorkers === 0) allWorkersDone(); };
+
+        activeWorkers = Math.min(currentThreads, workSegments.length);
+        for (let i = 0; i < activeWorkers; i++) {
+            worker().then(onWorkerExit);
+        }
+        await workerCompletion;
+        await appendPromise;
         if (cancelCheck && cancelCheck()) return;
 
         updateProgress(true);
-        console.log(`[downloadM3u8BySegments] 下载完成: 成功${workSegments.length - failCount}个，失败${failCount}个，总字节${totalBytes}`);
+        const successCount = workSegments.length - failCount;
+        console.log(`[downloadM3u8BySegments] 下载完成: 成功${successCount}个，失败${failCount}个，总字节${totalBytes}`);
 
-        const segResults = [];
-        for (let i = 0; i < results.length; i++) {
-            if (cancelCheck && cancelCheck()) break;
-            if (results[i] && results[i].length > 0) {
-                await writer.addFile('', results[i]);
-                segResults.push({ dur: workSegments[i].dur, seq: workSegments[i].seq });
-            } else {
-                console.warn(`[downloadM3u8BySegments] 跳过空分片#${i}`);
-            }
-        }
-        if (segResults.length === 0) throw new Error('所有分片均下载失败');
-        return segResults;
+        if (successCount === 0) throw new Error('所有分片均下载失败');
+        return { successCount, failCount, totalBytes };
     };
 
     const downloadMp4 = async (url, saveName, onProgress, writer, cancelCheck = null) => {
@@ -969,117 +1011,113 @@
         buildStyles() {
             const c = Config.colors;
             return `
-                :host, #${Config.uiId} { font-family: sans-serif; font-size: 11px; }
+                :host, #${Config.uiId} {
+                    --primary: ${c.primary};
+                    --bg: ${c.background};
+                    --text: ${c.text};
+                    --bg-input: #0f3460;
+                    --divider: rgba(255,255,255,0.1);
+                    --divider-soft: rgba(255,255,255,0.06);
+                    --dim: #aaa;
+                    --danger: #f44336;
+                    --info: #2196F3;
+                    font-family: sans-serif; font-size: 11px;
+                }
                 .main-panel {
                     width: min(340px, calc(100vw - 20px)); max-height: 400px;
-                    background: ${c.background}; color: ${c.text};
-                    border: 1px solid ${c.primary}; border-radius: 6px;
-                    backdrop-filter: blur(5px); display: flex; flex-direction: column;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.5); overflow: hidden;
+                    background: var(--bg); color: var(--text);
+                    border: 1px solid var(--primary); border-radius: 6px;
+                    backdrop-filter: blur(5px);
+                    display: flex; flex-direction: column; overflow: hidden;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
                 }
-                .tab-header {
-                    display: flex; background: rgba(255,255,255,0.06);
-                    border-bottom: 1px solid rgba(255,255,255,0.1);
-                }
+                .tab-header, .tab-body { display: flex; flex-direction: column; }
+                .tab-header { flex-direction: row; background: var(--divider-soft); border-bottom: 1px solid var(--divider); }
+                .tab-body { flex: 1; overflow: hidden; }
                 .tab-btn {
-                    flex: 1; padding: 7px 4px; background: transparent; border: none;
-                    color: #aaa; font-size: 11px; font-weight: bold; cursor: pointer;
+                    flex: 1; padding: 7px 4px; background: 0; border: 0;
+                    color: var(--dim); font-size: 11px; font-weight: bold; cursor: pointer;
                     border-bottom: 2px solid transparent;
                 }
-                .tab-btn.active { color: ${c.primary}; border-bottom-color: ${c.primary}; }
+                .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
                 .close-btn {
                     padding: 4px 10px; color: #888; cursor: pointer; font-size: 14px;
-                    user-select: none; border-left: 1px solid rgba(255,255,255,0.1);
+                    user-select: none; border-left: 1px solid var(--divider);
                 }
                 .close-btn:hover { color: #fff; }
-                .tab-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
                 .tab-panel { display: none; flex: 1; overflow-y: auto; }
                 .tab-panel.active { display: block; }
 
-                /* -- Tab1 嗅探 -- */
-                .sniffer-list { padding: 4px 0; }
-                .sniffer-item { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
-                .sniffer-item:last-child { border-bottom: none; }
+                .sniffer-list, .setting-body, .queue-list { padding: 4px 0; }
+                .sniffer-item, .queue-row { padding: 6px 8px; border-bottom: 1px solid var(--divider-soft); }
+                .sniffer-item:last-child, .queue-row:last-child { border-bottom: none; }
+
                 .item-type {
-                    display: inline-block; background: ${c.primary}; color: #000;
+                    display: inline-block; background: var(--primary); color: #000;
                     padding: 1px 4px; border-radius: 2px; font-weight: bold; font-size: 9px; margin-right: 4px;
                 }
-                .item-type.mp4 { background: #2196F3; color: #fff; }
-                .item-name { font-weight: bold; margin-bottom: 2px; word-break: break-all; }
-                .item-info { color: #aaa; font-size: 10px; margin-bottom: 4px; }
-                .item-btns { display: flex; gap: 4px; }
-                .btn { border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; font-weight: bold; }
-                .btn-copy { background: #555; color: white; }
-                .btn-select { background: ${c.primary}; color: #000; }
-                .empty-tip { padding: 16px; text-align: center; color: #666; }
-                .sniffer-status {
-                    padding: 4px 8px; border-top: 1px solid rgba(255,255,255,0.1);
-                    font-size: 10px; color: #aaa;
-                }
-                .head-btn {
-                    background: transparent; border: 1px solid ${c.primary}; color: ${c.primary};
-                    padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;
-                }
+                .item-type.mp4 { background: var(--info); color: #fff; }
+                .item-name, .queue-row-name { font-weight: bold; }
+                .item-name { margin-bottom: 2px; word-break: break-all; }
+                .item-info, .sniffer-status, .setting-info, .queue-row-info { color: var(--dim); font-size: 10px; }
+                .item-info { margin-bottom: 4px; }
+                .item-btns, .btn-row, .mode-row, .input-row { display: flex; gap: 4px; }
+                .btn-row, .mode-row, .input-row { margin-bottom: 4px; align-items: center; }
+                .btn-row { margin-top: 8px; }
 
-                /* -- Tab2 配置 -- */
-                .setting-body { padding: 6px 8px; }
-                .setting-info { color: #aaa; font-size: 10px; margin-bottom: 6px; }
-                .mode-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
-                .mode-row input[type="radio"] { margin: 0; accent-color: ${c.primary}; }
-                .mode-row label { cursor: pointer; display: flex; align-items: center; gap: 2px; }
-                .input-row { display: flex; gap: 4px; align-items: center; margin-bottom: 4px; }
-                .input-row input {
-                    flex: 1; padding: 4px 6px; border: 1px solid #333; border-radius: 3px;
-                    background: #0f3460; color: #fff; font-size: 10px; min-width: 50px;
+                .btn, .head-btn, .btn-queue-add, .btn-back-sniff {
+                    border-radius: 3px; cursor: pointer; font-weight: bold;
                 }
-                .filename-edit {
-                    cursor: pointer; border-bottom: 1px dashed #aaa;
-                    flex: 1; white-space: normal; word-break: break-all; overflow: hidden; font-weight: bold;
-                }
-                .filename-edit:hover { color: ${c.primary}; }
-                .filename-input {
-                    flex: 1; padding: 2px 4px; border: 1px solid ${c.primary};
-                    border-radius: 3px; background: #0f3460; color: #fff; font-size: 11px;
-                }
-                .btn-row { display: flex; gap: 4px; margin-top: 8px; }
-                .btn-queue-add {
-                    flex: 1; background: ${c.primary}; color: #000; font-weight: bold; padding: 6px 8px; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;
-                }
+                .btn { border: 0; padding: 4px 8px; font-size: 10px; }
+                .btn-copy { background: #555; color: #fff; }
+                .btn-select, .btn-queue-add { background: var(--primary); color: #000; }
+                .btn-queue-add { flex: 1; padding: 6px 8px; font-size: 11px; border: 0; }
                 .btn-queue-add:disabled { opacity: 0.6; cursor: default; }
-                .btn-back-sniff {
-                    background: transparent; border: 1px solid ${c.primary}; color: ${c.primary};
-                    padding: 6px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;
+                .btn-clear-all, .btn-row-inline .btn-remove, .btn-cancel { background: var(--danger); color: #fff; }
+                .btn-row-inline .btn-cancel { background: #ff9800; color: #000; }
+                .btn-row-inline .btn { padding: 2px 6px; font-size: 9px; border: 0; border-radius: 2px; }
+                .head-btn, .btn-back-sniff {
+                    background: transparent; border: 1px solid var(--primary); color: var(--primary);
+                    padding: 2px 6px; font-size: 10px;
                 }
+                .btn-back-sniff { padding: 6px 8px; }
+                .queue-header-bar .btn { padding: 3px 6px; font-size: 9px; }
+
+                .sniffer-status, .queue-header-bar {
+                    padding: 4px 8px; border-top: 1px solid var(--divider);
+                    display: flex; justify-content: space-between; align-items: center;
+                }
+                .queue-header-bar { border-bottom: 1px solid var(--divider); border-top: 0; }
+
+                .empty-tip { padding: 16px; text-align: center; color: #666; }
+
+                .mode-row input[type="radio"] { margin: 0; accent-color: var(--primary); }
+                .mode-row label { cursor: pointer; display: flex; align-items: center; gap: 2px; }
+                .input-row input, .filename-input {
+                    flex: 1; padding: 4px 6px; border: 1px solid #333; border-radius: 3px;
+                    background: var(--bg-input); color: #fff; font-size: 10px; min-width: 50px;
+                }
+                .filename-input { padding: 2px 4px; border-color: var(--primary); font-size: 11px; }
+                .filename-edit {
+                    cursor: pointer; border-bottom: 1px dashed var(--dim);
+                    flex: 1; white-space: normal; word-break: break-all; overflow: hidden;
+                }
+                .filename-edit:hover { color: var(--primary); }
                 .dup-tip { color: #ff9800; font-size: 10px; margin-top: 4px; min-height: 14px; }
 
-                /* -- Tab3 队列 -- */
-                .queue-header-bar {
-                    padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.1);
-                    display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #aaa;
-                }
-                .queue-header-bar .btn { padding: 3px 6px; font-size: 9px; }
-                .queue-list { padding: 0; }
-                .queue-row {
-                    padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.06);
-                    display: flex; flex-direction: column; gap: 3px; font-size: 11px;
-                }
-                .queue-row-head { display: flex; align-items: center; gap: 6px; }
-                .queue-row-foot { display: flex; align-items: center; gap: 6px; }
+                .queue-row { gap: 3px; }
+                .queue-row-head, .queue-row-foot { display: flex; align-items: center; gap: 6px; }
                 .queue-row-time { color: #777; font-size: 9px; flex-shrink: 0; min-width: 70px; }
-                .queue-row-name { font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-                .q-status {
-                    font-size: 9px; padding: 1px 5px; border-radius: 2px; font-weight: bold; flex-shrink: 0;
+                .queue-row-name, .queue-row-info {
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
                 }
+
+                .q-status { font-size: 9px; padding: 1px 5px; border-radius: 2px; font-weight: bold; flex-shrink: 0; }
                 .q-status-waiting { background: #607d8b; color: #fff; }
-                .q-status-downloading { background: ${c.primary}; color: #000; }
-                .q-status-done { background: #2196F3; color: #fff; }
-                .q-status-error { background: #f44336; color: #fff; }
+                .q-status-downloading { background: var(--primary); color: #000; }
+                .q-status-done { background: var(--info); color: #fff; }
+                .q-status-error { background: var(--danger); color: #fff; }
                 .q-status-cancelled { background: #888; color: #fff; }
-                .queue-row-info { color: #aaa; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-                .btn-clear-all { background: #f44336; color: white; }
-                .btn-row-inline .btn { padding: 2px 6px; font-size: 9px; border: none; border-radius: 2px; cursor: pointer; }
-                .btn-row-inline .btn-cancel { background: #ff9800; color: #000; }
-                .btn-row-inline .btn-remove { background: #f44336; color: white; }
             `;
         }
 
