@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE 命令生成器
 // @namespace    http://tampermonkey.net/
-// @version      4.1
+// @version      5.2
 // @description  自动嗅探m3u8 → 生成N_m3u8DL-RE下载命令 → 导出txt
 // @match        *://*/*
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
+// @grant        GM_webRequest
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -23,22 +24,44 @@
         endTime: '',
         fileName: '',
         currentTab: 0,
+        referer: '',
+        visitedRes: new Set(),
     };
 
     function startSniffer() {
         const m3u8Regex = /\.m3u8($|\?)|application\/.*mpegurl/i;
 
-        const originalFetch = window.fetch;
-        if (originalFetch) {
+        const captureReferer = () => { state.referer = location.href; };
+        captureReferer();
+
+        try {
+            const origOpen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function (method, url, async) {
+                this._url = url;
+                this.addEventListener('load', () => {
+                    try {
+                        const u = this.responseURL || this._url;
+                        if (m3u8Regex.test(u)) {
+                            handleM3u8Found(u);
+                        }
+                    } catch (e) { }
+                });
+                return origOpen.apply(this, arguments);
+            };
+        } catch (e) { }
+
+        const origFetch = window.fetch;
+        if (origFetch) {
             window.fetch = async function (...args) {
                 const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+                captureReferer();
                 try {
-                    const response = await originalFetch.apply(this, args);
-                    const contentType = response.headers.get('content-type') || '';
-                    if (m3u8Regex.test(url) || m3u8Regex.test(contentType)) {
+                    const res = await origFetch.apply(this, args);
+                    const ct = res.headers.get('content-type') || '';
+                    if (m3u8Regex.test(url) || m3u8Regex.test(ct)) {
                         handleM3u8Found(url);
                     }
-                    return response;
+                    return res;
                 } catch (err) {
                     if (m3u8Regex.test(url)) handleM3u8Found(url);
                     throw err;
@@ -46,40 +69,72 @@
             };
         }
 
-        const originalXHR = window.XMLHttpRequest;
-        if (originalXHR) {
-            class HijackedXHR extends originalXHR {
-                open(method, url, ...rest) {
-                    this._requestUrl = url;
-                    super.open(method, url, ...rest);
-                }
-                send(...args) {
-                    this.addEventListener('readystatechange', () => {
-                        if (this.readyState === 4) {
-                            try {
-                                const url = this.responseURL || this._requestUrl;
-                                const contentType = this.getResponseHeader('content-type') || '';
-                                if (m3u8Regex.test(url) || m3u8Regex.test(contentType)) {
-                                    handleM3u8Found(url);
-                                }
-                            } catch (e) { }
+        if (window.performance && typeof PerformanceObserver !== 'undefined') {
+            try {
+                const scan = () => {
+                    performance.getEntriesByType('resource').forEach(entry => {
+                        if (state.visitedRes.has(entry.name)) return;
+                        state.visitedRes.add(entry.name);
+                        if (m3u8Regex.test(entry.name)) {
+                            handleM3u8Found(entry.name);
                         }
                     });
-                    super.send(...args);
-                }
+                };
+                scan();
+                const ob = new PerformanceObserver(scan);
+                ob.observe({ entryTypes: ['resource'] });
+            } catch (e) {
+                try {
+                    performance.getEntriesByType('resource').forEach(entry => {
+                        if (m3u8Regex.test(entry.name)) handleM3u8Found(entry.name);
+                    });
+                } catch (ee) { }
             }
-            window.XMLHttpRequest = HijackedXHR;
         }
 
-        if (window.performance && typeof performance.getEntriesByType === 'function') {
-            try {
-                performance.getEntriesByType('resource').forEach(entry => {
-                    if (m3u8Regex.test(entry.name)) {
-                        handleM3u8Found(entry.name);
-                    }
-                });
-            } catch (e) { }
+        const scanDOM = () => {
+            document.querySelectorAll('video, source').forEach(el => {
+                let src = el.getAttribute('src') || el.currentSrc || '';
+                if (!src || src.startsWith('blob:')) return;
+                if (m3u8Regex.test(src)) handleM3u8Found(src);
+                if (src && !/^https?:/.test(src) && src.startsWith('/')) {
+                    src = location.origin + src;
+                    if (m3u8Regex.test(src)) handleM3u8Found(src);
+                }
+            });
+        };
+        scanDOM();
+        if (document.body) {
+            const mo = new MutationObserver(() => scanDOM());
+            mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
         }
+
+        try {
+            GM_webRequest([
+                { selector: '*://*/*.m3u8*', action: { redirect: { from: '(.*)', to: '$1' } } },
+                { selector: '*://*/*m3u8*', action: { redirect: { from: '(.*)', to: '$1' } } },
+            ], function (info, message, details) {
+                if (details && details.url) handleM3u8Found(details.url);
+            });
+        } catch (e) { }
+
+        const _wrapHistory = (type) => {
+            const orig = history[type];
+            history[type] = function () {
+                const rv = orig.apply(this, arguments);
+                captureReferer();
+                scanDOM();
+                window.dispatchEvent(new Event(type));
+                return rv;
+            };
+        };
+        try { _wrapHistory('pushState'); _wrapHistory('replaceState'); } catch (e) { }
+
+        window.addEventListener('message', (ev) => {
+            if (ev.data && typeof ev.data === 'string' && m3u8Regex.test(ev.data)) {
+                handleM3u8Found(ev.data);
+            }
+        }, true);
     }
 
     function handleM3u8Found(url) {
@@ -108,16 +163,29 @@
 
     function buildCommand() {
         if (!state.selectedUrl) return '';
-        const parts = ['~/test/N_m3u8DL-RE', `"${state.selectedUrl}"`];
+        const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
+        const ref = state.referer || location.href;
+        const fname = state.fileName || 'clip';
+        const lines = [
+            '~/test/N_m3u8DL-RE "' + state.selectedUrl + '" \\',
+            '  -H "User-Agent: ' + ua + '" \\',
+            '  -H "Referer: ' + ref + '" \\',
+        ];
         if (state.startTime && state.endTime) {
             const start = toHMS(state.startTime);
             const end = toHMS(state.endTime);
             if (start && end) {
-                parts.push(`--custom-range "${start}-${end}"`);
+                lines.push('  --custom-range "' + start + '-' + end + '" \\');
             }
         }
-        parts.push('--thread-count 8', '--download-retry-count 5', '--no-log', '--save-dir ~/storage/downloads', `--save-name "${state.fileName || 'clip'}"`);
-        return parts.join(' ');
+        lines.push(
+            '  --thread-count 8 \\',
+            '  --download-retry-count 5 \\',
+            '  --no-log \\',
+            '  --save-dir ~/storage/downloads \\',
+            '  --save-name "' + fname + '"'
+        );
+        return lines.join('\n');
     }
 
     function copyToClipboard(text) {
@@ -209,7 +277,7 @@
     .time-sep{color:#888;}
     .hint{padding:0 8px 4px;color:#666;font-size:10px;text-align:center;line-height:1.5;}
     .file-row{padding:4px 8px 8px;}
-    .file-input{width:100%;padding:6px;background:#0f3460;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:3px;font-size:12px;outline:none;box-sizing:border-box;}
+    .file-input{width:100%;padding:6px;background:#0f3460;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:3px;font-size:12px;outline:none;box-sizing:border-box;resize:none;min-height:46px;max-height:60px;overflow:hidden;line-height:1.4;white-space:pre-wrap;word-break:break-all;}
     .file-input:focus{border-color:#4caf50;}
     .next-row{padding:0 8px 8px;display:flex;justify-content:flex-end;}
     .warn{text-align:center;padding:16px;color:#ff9800;font-size:11px;}
@@ -460,10 +528,7 @@
             <div class="hint">格式 HHMMSS（6位数字）<br>清空两个框 = 全程下载</div>
             <div class="section-title">── 文件名 ──</div>
             <div class="file-row">
-                <input class="file-input" id="file-name" type="text" placeholder="保存文件名" value="${escapeHtml(state.fileName)}">
-            </div>
-            <div class="next-row">
-                <button class="btn" id="next-btn">下一步 →</button>
+                <textarea class="file-input" id="file-name" rows="2" placeholder="保存文件名">${escapeHtml(state.fileName)}</textarea>
             </div>
         `;
 
@@ -483,7 +548,6 @@
             state.fileName = fn.value;
         });
 
-        contentEl.querySelector('#next-btn').addEventListener('click', () => switchTab(2));
         contentEl.querySelector('.picked-row').addEventListener('click', () => switchTab(0));
     }
 
@@ -533,7 +597,7 @@
     function run() {
         state.fileName = safeName(document.title);
         startSniffer();
-        initPanel();
+        if (window.self === window.top) initPanel();
     }
 
     if (document.body) {
