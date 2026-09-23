@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         视频控制条
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      3.0
 // @description  智能识别主视频自动播放，两行紧凑控制条支持精确跳转、长按快进、倍速控制
 // @author       You
 // @match        *://*/*
@@ -36,9 +36,7 @@
   };
 
   // ========== 状态变量 ==========
-  let isEnabled = GM_getValue('videoControllerEnabled', CONFIG.defaultEnabled);
   let controller = null;
-  let toggleButton = null;
   let timeUpdateInterval = null;
   let autoPlayTriggered = false;
   let autoPlayRetryCount = 0;
@@ -191,7 +189,7 @@
       user-select:none;
       -webkit-touch-callout:none;
       ${posInit}
-      ${isEnabled ? 'opacity: 1;' : 'opacity: 0; pointer-events: none;'}
+      opacity: 1;
     `;
 
     const dragHandle = document.createElement("div");
@@ -514,8 +512,8 @@
     controllerObserver = new MutationObserver(() => {
       if (!document.body.contains(controller)) {
         document.body.appendChild(controller);
-        controller.style.opacity = isEnabled ? "1" : "0";
-        controller.style.pointerEvents = isEnabled ? "auto" : "none";
+        controller.style.opacity = "1";
+        controller.style.pointerEvents = "auto";
       }
     });
     controllerObserver.observe(document.body, { childList: true, subtree: true });
@@ -529,7 +527,7 @@
     if (timeUpdateInterval) return;
     timeUpdateInterval = setInterval(() => {
       const vid = getMainVideo();
-      if (!vid || !isEnabled) {
+      if (!vid) {
         clearInterval(timeUpdateInterval);
         timeUpdateInterval = null;
         return;
@@ -587,27 +585,6 @@
     return btn;
   }
 
-  function toggleController() {
-    isEnabled = !isEnabled;
-    GM_setValue('videoControllerEnabled', isEnabled);
-    refreshToggleUI();
-    if (isEnabled) {
-      if (!controller) {
-        createController();
-      } else {
-        controller.style.opacity = "1";
-        controller.style.pointerEvents = "auto";
-        refreshDomCache();
-      }
-    } else {
-      if (controller) {
-        controller.style.opacity = "0";
-        controller.style.pointerEvents = "none";
-      }
-      clearDomCache();
-    }
-  }
-
   function refreshDomCache() {
     if (!controller) return;
     domCache.playPauseBtn = document.getElementById("play-pause-btn");
@@ -631,58 +608,6 @@
       speedBtn: null,
       speedSelect: null
     };
-  }
-
-  function refreshToggleUI() {
-    if (!toggleButton) return;
-    toggleButton.textContent = isEnabled ? "▼" : "▲";
-    toggleButton.style.background = isEnabled ? CONFIG.accentColor : CONFIG.buttonColor;
-  }
-
-  function createToggleButton() {
-    if (toggleButton) return;
-    toggleButton = document.createElement("div");
-    toggleButton.id = "video-controller-toggle";
-    toggleButton.style.cssText = `
-      position:fixed;bottom:25px;right:25px;width:46px;height:46px;border-radius:50%;
-      display:flex;align-items:center;justify-content:center;color:${CONFIG.textColor};
-      font-size:20px;z-index:2147483646;cursor:pointer;transition:0.3s;border:none;
-    `;
-    refreshToggleUI();
-    let longPressTimer = null;
-    let longPressTriggered = false;
-    const onPointerDown = () => {
-      longPressTriggered = false;
-      longPressTimer = setTimeout(() => {
-        longPressTriggered = true;
-        GM_setValue('controllerPos', null);
-        controllerPos = null;
-        if (controller) {
-          controller.style.left = '50%';
-          controller.style.bottom = '85px';
-          controller.style.right = 'auto';
-          controller.style.top = 'auto';
-          controller.style.transform = 'translateX(-50%)';
-        }
-      }, 600);
-    };
-    const onPointerUp = () => {
-      if (longPressTimer) {
-        clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-    };
-    toggleButton.addEventListener('mousedown', onPointerDown);
-    toggleButton.addEventListener('mouseup', onPointerUp);
-    toggleButton.addEventListener('mouseleave', onPointerUp);
-    toggleButton.addEventListener('touchstart', onPointerDown, { passive: true });
-    toggleButton.addEventListener('touchend', onPointerUp);
-    toggleButton.addEventListener('touchcancel', onPointerUp);
-    toggleButton.onclick = () => {
-      if (longPressTriggered) return;
-      toggleController();
-    };
-    document.body.appendChild(toggleButton);
   }
 
   // ========== 视频操作 ==========
@@ -743,10 +668,9 @@
 
   function autoHideWhenNoVideo() {
     const vid = getMainVideo();
-    if (toggleButton) toggleButton.style.display = vid ? "flex" : "none";
-    if (controller && !vid && !isEnabled) {
-      controller.style.opacity = "0";
-      controller.style.pointerEvents = "none";
+    if (controller) {
+      controller.style.opacity = vid ? "1" : "0";
+      controller.style.pointerEvents = vid ? "auto" : "none";
     }
   }
 
@@ -783,9 +707,7 @@
       videoObserver = null;
     }
     if (controller && controller.parentNode) controller.parentNode.removeChild(controller);
-    if (toggleButton && toggleButton.parentNode) toggleButton.parentNode.removeChild(toggleButton);
     controller = null;
-    toggleButton = null;
     domCache = {
       playPauseBtn: null,
       progressFill: null,
@@ -801,11 +723,8 @@
   }
 
   function init() {
-    createToggleButton();
+    createController();
     autoHideWhenNoVideo();
-    if (isEnabled) {
-      createController();
-    }
     setTimeout(tryAutoPlayMainVideo, CONFIG.autoPlayDelay);
   }
 

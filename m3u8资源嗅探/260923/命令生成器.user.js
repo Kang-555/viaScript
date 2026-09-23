@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE 命令生成器
 // @namespace    http://tampermonkey.net/
-// @version      5.2
+// @version      5.3
 // @description  自动嗅探m3u8 → 生成N_m3u8DL-RE下载命令 → 导出txt
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -26,6 +26,8 @@
         currentTab: 0,
         referer: '',
         visitedRes: new Set(),
+        customCommand: null,
+        lastBuilt: '',
     };
 
     function startSniffer() {
@@ -270,14 +272,15 @@
     .status-bar{padding:4px 8px;border-top:1px solid rgba(255,255,255,0.06);color:#aaa;font-size:10px;flex-shrink:0;}
 
     .picked-row{padding:8px;background:rgba(76,175,80,0.1);border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;color:#4caf50;font-weight:bold;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-    .section-title{padding:6px 8px;color:#888;font-size:10px;border-bottom:1px solid rgba(255,255,255,0.06);margin-top:4px;}
-    .time-row{display:flex;align-items:center;justify-content:center;gap:8px;padding:8px;}
-    .time-input{width:70px;font-family:monospace;font-size:14px;text-align:center;background:#0f3460;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:3px;padding:6px 4px;outline:none;}
+    .section-title{padding:6px 8px;color:#888;font-size:10px;border-bottom:1px solid rgba(255,255,255,0.06);margin-top:4px;display:flex;align-items:center;justify-content:space-between;}
+    .section-title .sec-txt{color:#888;}
+    .section-title .sec-hint{color:#555;font-size:9px;font-weight:normal;}
+    .time-row{display:flex;align-items:center;justify-content:center;gap:8px;padding:4px 8px 8px;}
+    .time-input{width:70px;font-family:monospace;font-size:14px;text-align:center;color:#fff;border:1px solid rgba(255,255,255,0.25);border-radius:3px;padding:4px 4px;outline:none;flex-shrink:0;background:rgba(255,255,255,0.06);}
     .time-input:focus{border-color:#4caf50;}
-    .time-sep{color:#888;}
-    .hint{padding:0 8px 4px;color:#666;font-size:10px;text-align:center;line-height:1.5;}
+    .time-sep{color:#888;flex-shrink:0;}
     .file-row{padding:4px 8px 8px;}
-    .file-input{width:100%;padding:6px;background:#0f3460;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:3px;font-size:12px;outline:none;box-sizing:border-box;resize:none;min-height:46px;max-height:60px;overflow:hidden;line-height:1.4;white-space:pre-wrap;word-break:break-all;}
+    .file-input{width:100%;padding:6px;background:#0f3460;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:3px;font-size:12px;outline:none;box-sizing:border-box;resize:none;min-height:30px;max-height:80px;overflow-y:auto;line-height:1.4;white-space:pre-wrap;word-break:break-all;}
     .file-input:focus{border-color:#4caf50;}
     .next-row{padding:0 8px 8px;display:flex;justify-content:flex-end;}
     .warn{text-align:center;padding:16px;color:#ff9800;font-size:11px;}
@@ -519,14 +522,13 @@
         const urlName = escapeHtml((state.selectedUrl.split('/').pop().split('?')[0]) || state.selectedUrl);
         contentEl.innerHTML = `
             <div class="picked-row">📌 ${urlName}</div>
-            <div class="section-title">── 时间范围 ──</div>
+            <div class="section-title"><span class="sec-txt">── 时间范围 ──</span><span class="sec-hint">HHMMSS 6位·清空=全程</span></div>
             <div class="time-row">
                 <input class="time-input" id="start-time" inputmode="numeric" maxlength="6" placeholder="起始" value="${state.startTime}">
                 <span class="time-sep">—</span>
                 <input class="time-input" id="end-time" inputmode="numeric" maxlength="6" placeholder="结束" value="${state.endTime}">
             </div>
-            <div class="hint">格式 HHMMSS（6位数字）<br>清空两个框 = 全程下载</div>
-            <div class="section-title">── 文件名 ──</div>
+            <div class="section-title"><span class="sec-txt">── 文件名 ──</span></div>
             <div class="file-row">
                 <textarea class="file-input" id="file-name" rows="2" placeholder="保存文件名">${escapeHtml(state.fileName)}</textarea>
             </div>
@@ -546,7 +548,11 @@
 
         fn.addEventListener('input', () => {
             state.fileName = fn.value;
+            fn.style.height = '0px';
+            fn.style.height = Math.min(fn.scrollHeight, 80) + 'px';
         });
+        fn.style.height = '0px';
+        fn.style.height = Math.min(fn.scrollHeight, 80) + 'px';
 
         contentEl.querySelector('.picked-row').addEventListener('click', () => switchTab(0));
     }
@@ -572,8 +578,8 @@
                 <div class="sum-line">⏱ ${timeStr}</div>
                 <div class="sum-line">📄 文件名: ${fname}</div>
             </div>
-            <div class="preview-title">▶ 命令预览</div>
-            <textarea class="cmd-box" readonly></textarea>
+            <div class="preview-title">▶ 命令预览（可编辑）</div>
+            <textarea class="cmd-box"></textarea>
             <div class="btn-row">
                 <button class="btn primary" id="copy-btn">📋 复制</button>
                 <button class="btn" id="download-btn">💾 下载 nm_tpl.txt</button>
@@ -581,16 +587,29 @@
         `;
 
         const tb = contentEl.querySelector('.cmd-box');
-        tb.value = buildCommand();
+        const fresh = buildCommand();
+        if (state.customCommand && state.lastBuilt === fresh) {
+            tb.value = state.customCommand;
+        } else {
+            tb.value = fresh;
+            state.customCommand = null;
+            state.lastBuilt = fresh;
+        }
+
+        tb.addEventListener('input', () => {
+            state.customCommand = tb.value;
+        });
 
         contentEl.querySelector('#copy-btn').addEventListener('click', () => {
-            copyToClipboard(buildCommand()).then(ok => {
+            const txt = state.customCommand || fresh;
+            copyToClipboard(txt).then(ok => {
                 showToast(ok ? '已复制到剪贴板' : '复制失败');
             });
         });
 
         contentEl.querySelector('#download-btn').addEventListener('click', () => {
-            downloadTxt(buildCommand(), 'nm_tpl.txt');
+            const txt = state.customCommand || fresh;
+            downloadTxt(txt, 'nm_tpl.txt');
         });
     }
 
