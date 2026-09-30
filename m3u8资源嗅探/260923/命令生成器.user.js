@@ -168,26 +168,26 @@
         const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
         const ref = state.referer || location.href;
         const fname = state.fileName || 'clip';
-        const lines = [
-            '~/test/N_m3u8DL-RE "' + state.selectedUrl + '" \\',
-            '  -H "User-Agent: ' + ua + '" \\',
-            '  -H "Referer: ' + ref + '" \\',
+        const parts = [
+            '~/test/N_m3u8DL-RE "' + state.selectedUrl + '"',
+            '-H "User-Agent: ' + ua + '"',
+            '-H "Referer: ' + ref + '"',
         ];
         if (state.startTime && state.endTime) {
             const start = toHMS(state.startTime);
             const end = toHMS(state.endTime);
             if (start && end) {
-                lines.push('  --custom-range "' + start + '-' + end + '" \\');
+                parts.push('--custom-range "' + start + '-' + end + '"');
             }
         }
-        lines.push(
-            '  --thread-count 8 \\',
-            '  --download-retry-count 5 \\',
-            '  --no-log \\',
-            '  --save-dir ~/storage/downloads \\',
-            '  --save-name "' + fname + '"'
+        parts.push(
+            '--thread-count 8',
+            '--download-retry-count 5',
+            '--no-log',
+            '--save-dir ~/storage/downloads',
+            '--save-name "' + fname + '"'
         );
-        return lines.join('\n');
+        return parts.join(' ');
     }
 
     function copyToClipboard(text) {
