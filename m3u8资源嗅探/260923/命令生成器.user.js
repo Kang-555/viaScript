@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE 命令生成器
 // @namespace    http://tampermonkey.net/
-// @version      5.3
+// @version      5.4
 // @description  自动嗅探m3u8 → 生成N_m3u8DL-RE下载命令 → 导出txt
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -183,7 +183,7 @@
         parts.push(
             '--thread-count 8',
             '--download-retry-count 5',
-            '--no-log',
+            '--log-level off',
             '--save-dir ~/storage/downloads',
             '--save-name "' + fname + '"'
         );
