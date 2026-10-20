@@ -1,15 +1,15 @@
 // ==UserScript==
-// @name         图片链接收集器（懒加载增强版）
+// @name         图片链接收集器（无滚动，仅提取DOM链接）
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  扫描网页懒加载图片链接，导出 ManHuaUrls.txt 给Termux aria2下载
+// @version      1.6
+// @description  页面跳转立刻显示面板，直接提取img属性链接，移除自动滚动
 // @match        *://*/*
-// @grant        GM_addStyle
 // @connect      *
+// @run-at document-start
 // ==/UserScript==
 (function () {
     "use strict";
-    GM_addStyle(`
+    const __STYLE__ = `
     #linkCollectorBox{
       position:fixed;
       top:50%;
@@ -69,18 +69,11 @@
       border-radius:3px;
       word-break:break-all;
     }
-    #lcOpt{
-      font-size:8px;
-      color:#666;
-      text-align:center;
-      margin-top:4px;
-      line-height:1.4;
-    }
-    #lcOpt input{margin:0;vertical-align:middle;}
-  `);
+    `;
+    const __styleEl = document.createElement("style");
+    __styleEl.textContent = __STYLE__;
+    (document.head || document.documentElement).appendChild(__styleEl);
     let imgList = [];
-    const MIN_W = 400;
-    const MIN_H = 300;
     const EXT_BLACKLIST = /\.(gif|bmp)(\?|#|$)/i;
     let isScanning = false;
     let boxEl = null;
@@ -97,21 +90,8 @@
         }
         return null;
     }
+    // 只读取标签属性原始链接，不加载图片
     function resolveImgSrc(img) {
-        if (img.currentSrc && !img.currentSrc.startsWith("data:") && !img.currentSrc.startsWith("blob:")) {
-            return img.currentSrc;
-        }
-        if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
-            return img.src;
-        }
-        if (img.srcset) {
-            const candidates = img.srcset.split(",").map((s) => s.trim()).filter(Boolean);
-            if (candidates.length > 0) {
-                const best = candidates[candidates.length - 1];
-                return best.split(/\s+/)[0];
-            }
-        }
-        // 【增强懒加载属性列表】
         const lazyKeys = [
             "data-src", "data-original", "data-lazy",
             "data-url", "data-lazy-src", "data-original-src",
@@ -121,114 +101,76 @@
             const v = img.getAttribute(k);
             if (v && !v.startsWith("data:") && !v.startsWith("blob:")) return v;
         }
-        return "";
-    }
-    function waitImgLoad(img, timeout = 6000) {
-        return new Promise((resolve) => {
-            if (img.complete && img.naturalWidth > 0) return resolve(true);
-            const timer = setTimeout(() => {
-                img.removeEventListener("load", onLoad);
-                img.removeEventListener("error", onLoad);
-                resolve(false);
-            }, timeout);
-            const onLoad = () => {
-                clearTimeout(timer);
-                resolve(true);
-            };
-            img.addEventListener("load", onLoad);
-            img.addEventListener("error", onLoad);
-            if (!img.src) {
-                const dataSrc = img.getAttribute("data-src") || img.getAttribute("data-original");
-                if (dataSrc) img.src = dataSrc;
+        const srcAttr = img.getAttribute("src");
+        if (srcAttr && !srcAttr.startsWith("data:") && !srcAttr.startsWith("blob:")) {
+            return srcAttr;
+        }
+        if (img.srcset) {
+            const candidates = img.srcset.split(",").map((s) => s.trim()).filter(Boolean);
+            if (candidates.length > 0) {
+                const best = candidates[candidates.length - 1];
+                return best.split(/\s+/)[0];
             }
-        });
+        }
+        return "";
     }
     function getBgImgs() {
         const set = new Set();
         const arr = [];
-        document.querySelectorAll("div,section,li,a").forEach((el) => {
-            const bg = getComputedStyle(el).backgroundImage;
+        const nodes = document.querySelectorAll("div,section,li,a,figure");
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            let bg = el.style.backgroundImage;
+            if (!bg || bg === "none") {
+                if (el.offsetWidth === 0 && el.offsetHeight === 0) continue;
+                bg = getComputedStyle(el).backgroundImage;
+            }
+            if (!bg || bg === "none") continue;
             const m = bg.match(/url\(["']?(.*?)["']?\)/);
             if (m?.[1] && !set.has(m[1]) && !EXT_BLACKLIST.test(m[1])) {
                 set.add(m[1]);
                 arr.push(m[1]);
             }
-        });
+        }
         return arr;
     }
-    async function autoScrollLoad() {
-        updateStat("滚动加载中...");
-        const DELAY = 400;
-        const MAX_WAIT = 15000;
-        const t0 = Date.now();
-        let lastH = 0;
-        let sameHits = 0;
 
-        const scrollStep = async () => {
-            window.scrollTo(0, document.body.scrollHeight);
-            await new Promise((r) => setTimeout(r, DELAY));
-            const h = document.body.scrollHeight;
-            if (h === lastH) {
-                sameHits++;
-            } else {
-                sameHits = 0;
-                lastH = h;
-            }
-            return { h, sameHits };
-        };
-
-        await scrollStep();
-        while (true) {
-            if (Date.now() - t0 > MAX_WAIT) break;
-            const el = document.getElementById("lcStat");
-            if (el) el.innerText = `滚动加载中...(${Math.round((Date.now() - t0) / 1000)}s)`;
-            const { sameHits: sh } = await scrollStep();
-            if (sh >= 3) break;
-        }
-        window.scrollTo(0, 0);
-        await new Promise((r) => setTimeout(r, 300));
-    }
-
-    async function scanImages() {
+    function scanImages() {
         if (isScanning) return;
         isScanning = true;
         imgList = [];
-
-        await autoScrollLoad();
-
-        updateStat("扫描中...");
-        const rule = getRule();
-        const allImgs = [...document.querySelectorAll("img")];
-        if (allImgs.length === 0) {
-            updateStat("无<img>");
+        try {
+            updateStat("提取链接中...");
+            const rule = getRule();
+            const allImgs = document.querySelectorAll("img");
+            if (allImgs.length === 0) {
+                updateStat("无<img>标签");
+                return;
+            }
+            const temp = [];
+            for (let i = 0; i < allImgs.length; i++) {
+                const src = resolveImgSrc(allImgs[i]);
+                if (!src) continue;
+                if (EXT_BLACKLIST.test(src)) continue;
+                let finalUrl = src;
+                try {
+                    finalUrl = new URL(src, location.href).href;
+                } catch (_) { }
+                if (rule) finalUrl = finalUrl.replace(rule[0], rule[1]);
+                temp.push(finalUrl);
+            }
+            temp.push(...getBgImgs());
+            imgList = [...new Set(temp)];
+            updateStat(`${imgList.length} 条`);
+            console.log(`[链接收集器] 提取完成，共 ${imgList.length} 条链接`);
+            console.group("[链接收集器] 完整链接列表");
+            for (let i = 0; i < imgList.length; i++) {
+                console.log(`${i + 1}. ${imgList[i]}`);
+            }
+            console.groupEnd();
+        } finally {
             isScanning = false;
-            return;
         }
-        const waitTasks = allImgs.map((img) => waitImgLoad(img, 5000));
-        await Promise.all(waitTasks);
-        const temp = [];
-        for (const img of allImgs) {
-            const src = resolveImgSrc(img);
-            if (!src) continue;
-            if (EXT_BLACKLIST.test(src)) continue;
-            const w = img.naturalWidth || img.width || 0;
-            const h = img.naturalHeight || img.height || 0;
-            if (w > 0 && h > 0 && (w < MIN_W || h < MIN_H)) continue;
-            let finalUrl = src;
-            try {
-                finalUrl = new URL(src, location.href).href;
-            } catch (_) { }
-            if (rule) finalUrl = finalUrl.replace(rule[0], rule[1]);
-            temp.push(finalUrl);
-        }
-        temp.push(...getBgImgs());
-        imgList = [...new Set(temp)];
-        updateStat(`${imgList.length} 条`);
-        console.log(`[链接收集器] 扫描完成，共 ${imgList.length} 条链接`);
-        console.group("[链接收集器] 完整链接列表");
-        imgList.forEach((u, i) => console.log(`${i + 1}. ${u}`));
-        console.groupEnd();
-        isScanning = false;
     }
     function updateStat(text) {
         const el = document.getElementById("lcStat");
@@ -309,9 +251,13 @@
         document.getElementById("lcCopy").onclick = copyAll;
         document.getElementById("lcClear").onclick = clearList;
     }
-    if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", initUI);
-    } else {
-        initUI();
+
+    function waitBodyAndInit() {
+        if (document.body) {
+            initUI();
+        } else {
+            document.addEventListener("DOMContentLoaded", initUI, { once: true });
+        }
     }
+    waitBodyAndInit();
 })();

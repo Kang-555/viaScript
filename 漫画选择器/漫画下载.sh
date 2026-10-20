@@ -21,7 +21,8 @@ while true; do
     TASK_NAME="manga_$(date +%Y%m%d_%H%M%S)"
     DOWNLOAD_LIST=$(cat "$FILE")
   fi
-  TASK_NAME=$(echo "$TASK_NAME" | sed 's/[\\/:*?"<>|]/_/g' | head -c 80)
+  # 只清理非法字符，不再截取长度
+  TASK_NAME=$(echo "$TASK_NAME" | sed 's/[\\/:*?"<>|]/_/g')
   COUNT=$(echo "$DOWNLOAD_LIST" | grep -cve '^\s*$')
   echo "📖漫画名：$TASK_NAME"
   echo "📋读取到 $COUNT 条图片链接"
@@ -67,14 +68,15 @@ while true; do
     echo "ℹ️未找到 mogrify(imagemagick)，跳过图片压缩"
   fi
 
-  # 打包ZIP
+  # 打包ZIP：直接把文件夹内部文件打包进zip，不带外层目录
   ZIP_FILE="$DOWNLOAD_DIR/manga_downloads/${TASK_NAME}.zip"
   echo "📦打包压缩ZIP：$ZIP_FILE"
-  cd "$DOWNLOAD_DIR/manga_downloads"
-  zip -r "$ZIP_FILE" "$TASK_NAME/"
+  cd "$MANGA_DIR"
+  zip -r "$ZIP_FILE" ./*
 
-  # 【可选】如果想打包成功后删除原图文件夹，取消下面这行注释
-  # rm -rf "$MANGA_DIR"
+  # ✅打包成功后直接删除原图文件夹（已启用）
+  echo "🗑️打包完成，删除原图文件夹 $MANGA_DIR"
+  rm -rf "$MANGA_DIR"
 
   rm -f "$FILE"
   echo "🗑️已删除任务文件 $FILE"
