@@ -1,4 +1,4 @@
-$ cat b
+cat > b <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 DOWNLOAD_DIR="$HOME/storage/downloads"
 PATTERN="ManHuaUrls.txt"
@@ -12,7 +12,7 @@ while true; do
   fi
   echo -e "\n=====处理任务文件 $FILE ====="
 
-  # 首行 #漫画名 → 提取做目录名；没有则时间戳兜 底
+  # 首行 #漫画名 → 提取做目录名；没有则时间戳兜底
   FIRST_LINE=$(head -n1 "$FILE")
   if [[ "$FIRST_LINE" =~ ^#(.+)$ ]]; then
     TASK_NAME="${BASH_REMATCH[1]}"
@@ -82,5 +82,5 @@ while true; do
   echo "🗑️已删除任务文件 $FILE"
   echo "✅任务完成！zip文件：$ZIP_FILE"
 done
-~ $
+EOF
 chmod +x b

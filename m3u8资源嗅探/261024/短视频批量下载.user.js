@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE 批量收集生成器
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.0
 // @description  按先后顺序收集页面多个m3u8/mp4，批量导出txt，自动标题+数字后缀
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -651,7 +651,7 @@
         });
         contentEl.querySelector('#download-batch').addEventListener('click', () => {
             const txt = buildBatchText();
-            downloadTxt(txt, 'batch.txt');
+            downloadTxt(txt, processBaseName(state.baseName || document.title) + '.txt');
         });
     }
 
