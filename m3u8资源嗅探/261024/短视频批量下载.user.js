@@ -264,7 +264,7 @@
 
     function buildBatchText() {
         const base = processBaseName(state.baseName || document.title);
-        const dirPath = '~/storage/downloads/' + base;
+        const dirPath = '/sdcard/Download/' + base;
         const lines = [];
         lines.push('mkdir -p "' + dirPath + '"');
         state.sniffedUrls.forEach((it, idx) => {

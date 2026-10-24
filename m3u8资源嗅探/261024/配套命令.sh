@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-DOWNLOAD_DIR="$HOME/storage/downloads"
+DOWNLOAD_DIR="/sdcard/Download"
 
 while true; do
     FILES=("$DOWNLOAD_DIR"/batch*.txt)
