@@ -50,6 +50,7 @@
         toast: _tag + '-tt',
         restoreBtn: _tag + '-rb',
         restoreShow: _tag + '-rb-s',
+        btnPaused: _tag + '-b-w',
     };
 
     const state = {
@@ -59,6 +60,7 @@
         visitedRes: new Set(),
         currentTab: 0,
         baseName: '',
+        paused: false,
     };
 
     const M3U8_REGEX = /\.m3u8($|\?)|application\/.*mpegurl/i;
@@ -190,6 +192,7 @@
     }
 
     function handleVideoFound(url, type) {
+        if (state.paused) return;
         if (window.self !== window.top) {
             try {
                 window.top.postMessage({
@@ -213,6 +216,16 @@
         return String(s || 'clip').replace(/[\\/:*?"<>|]/g, '_');
     }
 
+    function processBaseName(base) {
+        let name = String(base || '').trim();
+        if (/《([^》]+)》/.test(name)) {
+            name = name.match(/《([^》]+)》/)[1];
+        } else {
+            name = name.replace(/[-_][0-9]+$/, '');
+        }
+        return safeName(name);
+    }
+
     function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
@@ -222,7 +235,7 @@
         const type = item.type;
         const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
         const ref = state.referer || location.href;
-        const fname = safeName(baseName) + '_' + (index + 1);
+        const fname = processBaseName(baseName) + '_' + (index + 1);
 
         if (type === 'mp4') {
             const mp4Name = fname + '.mp4';
@@ -252,8 +265,9 @@
     }
 
     function buildBatchText() {
-        const base = state.baseName || safeName(document.title);
+        const base = processBaseName(state.baseName || document.title);
         const lines = [];
+        lines.push(base);
         state.sniffedUrls.forEach((it, idx) => {
             lines.push('# ===== 第' + (idx + 1) + '条 =====');
             lines.push(buildSingleCommand(it, idx, base));
@@ -331,9 +345,10 @@
     .${C.btn}{background:transparent;border:1px solid #4caf50;color:#4caf50;padding:7px 10px;border-radius:3px;cursor:pointer;font-size:11px;-webkit-tap-highlight-color:transparent;touch-action:manipulation;}
     .${C.btn}.${C.btnPrimary}{background:#4caf50;color:#000;}
     .${C.btn}.${C.btnPrimary}:active{background:#6dcf72;}
+    .${C.btn}.${C.btnPaused}{background:#ff9800;color:#000;border-color:#ff9800;}
     .${C.btnRow}{display:flex;gap:8px;padding:0 8px;margin-top:8px;}
     .${C.btnRow} .${C.btn}{flex:1;}
-    .${C.manualRow}{padding:0 8px 6px;}
+    .${C.manualRow}{padding:0 8px 6px;display:flex;gap:6px;flex-wrap:wrap;}
     .${C.divider}{height:1px;background:rgba(255,255,255,0.06);margin:4px 0;}
     .${C.list}{list-style:none;margin:0;padding:0;}
     .${C.item}{padding:8px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:6px;-webkit-tap-highlight-color:rgba(76,175,80,0.2);}
@@ -469,7 +484,8 @@
 
     function renderStatus() {
         if (!statusEl) return;
-        statusEl.textContent = `共 ${state.sniffedUrls.length} 个 | 嗅探中...`;
+        const statusText = state.paused ? '已暂停' : '嗅探中';
+        statusEl.textContent = `共 ${state.sniffedUrls.length} 个 | ${statusText}...`;
     }
 
     function getSnifferListEl() {
@@ -485,6 +501,7 @@
         let html = `
             <div class="${C.manualRow}">
                 <button class="${C.btn}" id="manual-paste">手动粘贴</button>
+                <button class="${C.btn} ${state.paused ? C.btnPaused : ''}" id="toggle-pause">${state.paused ? '继续嗅探' : '暂停嗅探'}</button>
                 <button class="${C.btn}" id="clear-all">清空列表</button>
             </div>
             <div class="${C.divider}"></div>
@@ -584,6 +601,12 @@
                     showToast('无法识别的链接格式');
                 }
             }
+        });
+        contentEl.querySelector('#toggle-pause')?.addEventListener('click', () => {
+            state.paused = !state.paused;
+            renderTabCollect();
+            renderStatus();
+            showToast(state.paused ? '嗅探已暂停' : '嗅探已继续');
         });
         contentEl.querySelector('#clear-all')?.addEventListener('click', () => {
             state.sniffedUrls = [];

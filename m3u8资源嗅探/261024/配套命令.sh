@@ -14,25 +14,18 @@ while true; do
 
     ALL_CMDS=()
     DIR_NAME=""
+    FIRST_LINE=1
     while IFS= read -r CMD; do
+        if [[ $FIRST_LINE -eq 1 ]]; then
+            if [[ -z "$CMD" || "$CMD" =~ ^# ]]; then
+                continue
+            fi
+            DIR_NAME="$CMD"
+            FIRST_LINE=0
+            continue
+        fi
         [[ -z "$CMD" || "$CMD" =~ ^# ]] && continue
         ALL_CMDS+=("$CMD")
-        if [[ -z "$DIR_NAME" ]]; then
-            if [[ $CMD =~ --save-name[[:space:]]+\"([^\"]+)\" ]]; then
-                DIR_NAME="${BASH_REMATCH[1]}"
-            elif [[ $CMD =~ -o[[:space:]]+~\/storage\/downloads\/([^\"]+) ]]; then
-                DIR_NAME="${BASH_REMATCH[1]}"
-                DIR_NAME="${DIR_NAME%.*}"
-            fi
-
-            # 优先提取《》里面的内容
-            if [[ $DIR_NAME =~ 《([^》]+)》 ]]; then
-                DIR_NAME="${BASH_REMATCH[1]}"
-            else
-                # 没有书名号，再切掉末尾 -数字
-                DIR_NAME="${DIR_NAME%-*[0-9]}"
-            fi
-        fi
     done < "$FILE"
 
     if [[ ${#ALL_CMDS[@]} -eq 0 ]]; then
