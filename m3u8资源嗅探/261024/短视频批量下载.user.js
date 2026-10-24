@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE 批量收集生成器
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      4.0
 // @description  按先后顺序收集页面多个m3u8/mp4，批量导出txt，自动标题+数字后缀
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -230,15 +230,13 @@
         return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
-    function buildSingleCommand(item, index, baseName) {
+    function buildSingleCommand(item, index, fname, dirPath) {
         const url = item.url;
         const type = item.type;
         const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
         const ref = state.referer || location.href;
-        const fname = processBaseName(baseName) + '_' + (index + 1);
 
         if (type === 'mp4') {
-            const mp4Name = fname + '.mp4';
             const parts = [
                 'curl -L "' + url + '"',
                 '-H "User-Agent: ' + ua + '"',
@@ -246,7 +244,7 @@
                 '--connect-timeout 15',
                 '--retry 3',
                 '--retry-delay 2',
-                '-o ~/storage/downloads/' + mp4Name
+                '-o "' + dirPath + '/' + fname + '.mp4"'
             ];
             return parts.join(' \\\n  ');
         }
@@ -258,7 +256,7 @@
             '--thread-count 8',
             '--download-retry-count 5',
             '--log-level error',
-            '--save-dir ~/storage/downloads',
+            '--save-dir "' + dirPath + '"',
             '--save-name "' + fname + '"'
         ];
         return parts.join(' ');
@@ -266,11 +264,13 @@
 
     function buildBatchText() {
         const base = processBaseName(state.baseName || document.title);
+        const dirPath = '~/storage/downloads/' + base;
         const lines = [];
-        lines.push(base);
+        lines.push('mkdir -p "' + dirPath + '"');
         state.sniffedUrls.forEach((it, idx) => {
+            const fname = base + '_' + (idx + 1);
             lines.push('# ===== 第' + (idx + 1) + '条 =====');
-            lines.push(buildSingleCommand(it, idx, base));
+            lines.push(buildSingleCommand(it, idx, fname, dirPath));
             lines.push('');
         });
         return lines.join('\n');
