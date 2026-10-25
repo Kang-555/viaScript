@@ -223,51 +223,76 @@
         lines.push(`echo "✅ ${base} 打包完成"`);
         return lines.join("\n");
     }
+    function copyToClipboard(text) {
+        return new Promise(resolve => {
+            if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => resolve(true), () => fallbackCopy(text, resolve));
+            } else {
+                fallbackCopy(text, resolve);
+            }
+        });
+    }
+
+    function fallbackCopy(text, resolve) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        ta.style.top = "-9999px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); resolve(true); }
+        catch (_) { resolve(false); }
+        ta.remove();
+    }
+
     function downloadTxt() {
-        if (imgList.length === 0) {
-            alert("请先扫描");
-            return;
-        }
+        if (imgList.length === 0) { alert("请先扫描"); return; }
         const base = processBaseName(document.title || "ManHua");
         const content = buildBatchText();
-        const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = base + ".txt";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-        console.log(`[链接收集器] 已下载 ${base}.txt，共 ${imgList.length} 条`);
-    }
-    function copyAll() {
-        if (imgList.length === 0) {
-            alert("请先扫描");
+        const filename = base + ".txt";
+
+        const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+        if (isIOS) {
+            const url = "data:text/plain;charset=utf-8," + encodeURIComponent(content);
+            const w = window.open(url, "_blank");
+            if (!w) location.href = url;
+            updateStat("iOS: 长按存文件");
+            setTimeout(() => updateStat(`${imgList.length} 条`), 2000);
             return;
         }
+
+        try {
+            const blob = new Blob([content], { type: "text/plain" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = filename;
+            a.style.display = "none";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+            updateStat(`已导出 ${filename}`);
+            setTimeout(() => updateStat(`${imgList.length} 条`), 2000);
+            console.log(`[链接收集器] 已下载 ${filename}，共 ${imgList.length} 条`);
+        } catch (e) {
+            copyToClipboard(content).then(ok => {
+                updateStat(ok ? "下载失败，已复制" : "导出失败");
+                setTimeout(() => updateStat(`${imgList.length} 条`), 2500);
+            });
+        }
+    }
+
+    function copyAll() {
+        if (imgList.length === 0) { alert("请先扫描"); return; }
         const text = imgList.join("\n");
         console.log("=== urls.txt ===");
         console.log(text);
-        const done = () => {
-            updateStat(`已复制 ${imgList.length}`);
+        copyToClipboard(text).then(ok => {
+            updateStat(ok ? `已复制 ${imgList.length}` : "复制失败");
             setTimeout(() => updateStat(`${imgList.length} 条`), 1500);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
-            navigator.clipboard.writeText(text).then(done, fallbackCopy);
-        } else {
-            fallbackCopy();
-        }
-        function fallbackCopy() {
-            const ta = document.createElement("textarea");
-            ta.value = text;
-            ta.style.position = "fixed";
-            ta.style.opacity = "0";
-            document.body.appendChild(ta);
-            ta.select();
-            try { document.execCommand("copy"); } catch (_) { }
-            document.body.removeChild(ta);
-            done();
-        }
+        });
     }
     function clearList() {
         imgList = [];
@@ -300,10 +325,18 @@
     }
 
     function waitBodyAndInit() {
-        if (document.body) {
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", initUI, { once: true });
+        } else if (document.body) {
             initUI();
         } else {
-            document.addEventListener("DOMContentLoaded", initUI, { once: true });
+            const observer = new MutationObserver(() => {
+                if (document.body) {
+                    observer.disconnect();
+                    initUI();
+                }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
         }
     }
     waitBodyAndInit();
