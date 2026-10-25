@@ -244,6 +244,8 @@
         const ref = state.referer || location.href;
         const fname = state.fileName || 'clip';
 
+        const VIDEOS_DIR = '/sdcard/Download/videos';
+
         if (type === 'mp4') {
             const mp4Name = safeName(fname) + '.mp4';
             const parts = [
@@ -253,9 +255,9 @@
                 '--connect-timeout 15',
                 '--retry 3',
                 '--retry-delay 2',
-                '-o ~/storage/downloads/' + mp4Name
+                '-o ' + VIDEOS_DIR + '/' + mp4Name
             ];
-            return parts.join(' \\\n  ');
+            return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' \\\n  ');
         }
 
         const parts = [
@@ -274,10 +276,10 @@
             '--thread-count 8',
             '--download-retry-count 5',
             '--log-level off',
-            '--save-dir ~/storage/downloads',
+            '--save-dir ' + VIDEOS_DIR,
             '--save-name "' + fname + '"'
         );
-        return parts.join(' ');
+        return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' ');
     }
 
     function copyToClipboard(text) {
@@ -774,7 +776,7 @@
 
         contentEl.querySelector('#download-btn').addEventListener('click', () => {
             const txt = state.customCommand || fresh;
-            downloadTxt(txt, 'nm_tpl.txt');
+            downloadTxt(txt, safeName(state.fileName || 'clip') + '.txt');
         });
     }
 
