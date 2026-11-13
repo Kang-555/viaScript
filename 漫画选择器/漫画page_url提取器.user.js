@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         漫画 page_url 提取器
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.4
 // @description  Hook mReader.initData 在数据产生瞬间捕获，无需等待渲染
 // @match        *://*/*
 // @connect      *
@@ -62,7 +62,6 @@
     let boxEl = null;
     let autoCaptured = false;
     const EXT_BLACKLIST = /\.(gif|bmp)(\?|#|$)/i;
-    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
     function captureUrls(urls, source) {
         if (!Array.isArray(urls) || urls.length === 0) return false;
@@ -332,20 +331,12 @@
         const content = buildBatchText();
         const filename = base + ".txt";
 
-        if (isIOS) {
-            const url = "data:text/plain;charset=utf-8," + encodeURIComponent(content);
-            const w = window.open(url, "_blank");
-            if (!w) location.href = url;
-            updateStat("iOS: 长按文本 → 存储到文件");
-            setTimeout(() => updateStat(`${imgList.length} 条`), 2500);
-            return;
-        }
-
         try {
             const blob = new Blob([content], { type: "text/plain" });
             const a = document.createElement("a");
             a.href = URL.createObjectURL(blob);
             a.download = filename;
+            a.rel = "noopener";
             a.style.display = "none";
             document.body.appendChild(a);
             a.click();

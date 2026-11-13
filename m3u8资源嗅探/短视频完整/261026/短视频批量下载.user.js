@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE 批量收集生成器
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  按先后顺序收集页面多个m3u8/mp4，批量导出txt，自动标题+数字后缀
+// @version      6.1
+// @description  按先后顺序收集页面多个m3u8/mp4/mpd，批量导出txt，自动标题+数字后缀
 // @match        *://*/*
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
@@ -180,6 +180,8 @@
                 { selector: '*://*/*m3u8*', action: { redirect: { from: '(.*)', to: '$1' } } },
                 { selector: '*://*/*.mp4*', action: { redirect: { from: '(.*)', to: '$1' } } },
                 { selector: '*://*/*mp4*', action: { redirect: { from: '(.*)', to: '$1' } } },
+                { selector: '*://*/*.mpd*', action: { redirect: { from: '(.*)', to: '$1' } } },
+                { selector: '*://*/*mpd*', action: { redirect: { from: '(.*)', to: '$1' } } },
             ], function (info, message, details) {
                 if (details && details.url) {
                     const type = detectType(details.url, '');
@@ -264,6 +266,20 @@
                 '-o "' + dirPath + '/' + fname + '.mp4"'
             ];
             return parts.join(' \\\n  ');
+        }
+
+        if (type === 'mpd') {
+            const parts = [
+                '~/test/N_m3u8DL-RE "' + url + '"',
+                '-H "User-Agent: ' + ua + '"',
+                '-H "Referer: ' + ref + '"',
+                '--thread-count 8',
+                '--download-retry-count 5',
+                '--log-level error',
+                '--save-dir "' + dirPath + '"',
+                '--save-name "' + fname + '"'
+            ];
+            return parts.join(' ');
         }
 
         const parts = [
@@ -501,8 +517,9 @@
 
     function renderStatus() {
         if (!statusEl) return;
+        const filterText = state.sizeFilterKB ? `过滤 <${state.sizeFilterKB}KB` : '无过滤';
         const statusText = state.paused ? '已暂停' : '嗅探中';
-        statusEl.textContent = `共 ${state.sniffedUrls.length} 个 | ${statusText}...`;
+        statusEl.textContent = `共 ${state.sniffedUrls.length} 个 | ${filterText} | ${statusText}...`;
     }
 
     function getSnifferListEl() {
@@ -515,16 +532,24 @@
 
     function renderTabCollect() {
         const items = state.sniffedUrls;
+        const filterKB = state.sizeFilterKB;
         let html = `
             <div class="${C.manualRow}">
                 <button class="${C.btn}" id="manual-paste">手动粘贴</button>
                 <button class="${C.btn} ${state.paused ? C.btnPaused : ''}" id="toggle-pause">${state.paused ? '继续嗅探' : '暂停嗅探'}</button>
                 <button class="${C.btn}" id="clear-all">清空列表</button>
             </div>
+            <div class="${C.manualRow}" style="align-items:center;gap:4px;">
+                <label style="color:#888;font-size:10px;white-space:nowrap;">过滤&lt;</label>
+                <input type="number" id="size-filter-input" value="${filterKB}" min="0" max="10240"
+                    style="width:60px;padding:3px 6px;background:#0f3460;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:3px;font-size:11px;outline:none;" />
+                <label style="color:#888;font-size:10px;">KB (0=关)</label>
+                <button class="${C.btn}" id="apply-size-filter" style="padding:3px 8px;font-size:10px;">应用过滤</button>
+            </div>
             <div class="${C.divider}"></div>
         `;
         if (items.length === 0) {
-            html += `<div class="${C.empty}">等待嗅探视频资源 (m3u8/mp4)...</div>`;
+            html += `<div class="${C.empty}">等待嗅探视频资源 (m3u8/mp4/mpd)...</div>`;
         } else {
             html += `<ul class="${C.list}"></ul>`;
         }
@@ -539,7 +564,11 @@
         bindCollectEvents();
     }
 
-    function triggerDownload(url, filename) {
+    function triggerDownload(url, filename, type) {
+        if (type && type !== "mp4") {
+            showToast("m3u8/mpd 需用 N_m3u8DL-RE 下载");
+            return;
+        }
         showToast('触发下载...');
         const a = document.createElement('a');
         a.href = url;
@@ -562,7 +591,7 @@
         li.dataset.idx = idx;
         li.dataset.url = url;
         li.title = url;
-        const typeLabel = type === 'mp4' ? '🎬' : '📺';
+        const typeLabel = type === 'mp4' ? '🎬' : type === 'mpd' ? '📡' : '📺';
         li.innerHTML = `
             <span class="${C.itemName}">${typeLabel} [${idx + 1}] ${name}</span>
             <button class="${C.itemDl}" title="直接下载">⬇</button>
@@ -578,7 +607,7 @@
         });
         li.querySelector('.' + C.itemDl).addEventListener('click', (e) => {
             e.stopPropagation();
-            triggerDownload(url, safeName(rawName));
+            triggerDownload(url, safeName(rawName), item.type);
         });
         li.querySelector('.' + C.itemDel).addEventListener('click', (e) => {
             e.stopPropagation();
@@ -608,7 +637,7 @@
 
     function bindCollectEvents() {
         contentEl.querySelector('#manual-paste')?.addEventListener('click', () => {
-            const url = prompt('粘贴视频链接 (m3u8/mp4)：');
+            const url = prompt('粘贴视频链接 (m3u8/mp4/mpd)：');
             if (url && url.trim()) {
                 const type = detectType(url.trim(), '');
                 if (type) {
@@ -631,6 +660,15 @@
             renderTabCollect();
             renderStatus();
             showToast('已清空');
+        });
+        contentEl.querySelector('#apply-size-filter')?.addEventListener('click', () => {
+            const input = contentEl.querySelector('#size-filter-input');
+            const kb = parseInt(input.value, 10);
+            if (!isNaN(kb) && kb >= 0) {
+                state.sizeFilterKB = kb;
+                renderStatus();
+                showToast(kb === 0 ? '大小过滤已关闭' : `过滤阈值: <${kb}KB`);
+            }
         });
     }
 
