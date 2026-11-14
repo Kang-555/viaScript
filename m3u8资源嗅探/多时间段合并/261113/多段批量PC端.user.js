@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         多端批量PC端.
+// @name         多时间段批量 PC端
 // @namespace    http://tampermonkey.net/
 // @version      2.3
 // @description  多时间段批量PC端下载，配合bat文件

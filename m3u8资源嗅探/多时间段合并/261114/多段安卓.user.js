@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         N_m3u8DL-RE / curl 命令生成器
+// @name         N_m3u8DL-RE多时间段安卓
 // @namespace    http://tampermonkey.net/
-// @version      2.3
-// @description  自动嗅探视频资源 (m3u8/mp4) → 根据类型生成对应下载命令 → 导出txt
+// @version      2.2
+// @description  多时间段批量安卓下载，配合termux文件
 // @match        *://*/*
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
@@ -64,8 +64,7 @@
         sniffedUrls: [],
         sniffedSet: new Set(),
         selectedUrl: null,
-        startTime: '',
-        endTime: '',
+        segments: [],
         fileName: '',
         currentTab: 0,
         referer: '',
@@ -260,26 +259,29 @@
             return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' \\\n  ');
         }
 
-        const parts = [
+        const saveDir = VIDEOS_DIR;
+        const baseName = safeName(fname);
+        const base = [
             '~/test/N_m3u8DL-RE "' + state.selectedUrl + '"',
             '-H "User-Agent: ' + ua + '"',
             '-H "Referer: ' + ref + '"',
-        ];
-        if (state.startTime && state.endTime) {
-            const start = toHMS(state.startTime);
-            const end = toHMS(state.endTime);
-            if (start && end) {
-                parts.push('--custom-range "' + start + '-' + end + '"');
-            }
-        }
-        parts.push(
             '--thread-count 8',
             '--download-retry-count 5',
-            '--log-level off',
-            '--save-dir ' + VIDEOS_DIR,
-            '--save-name "' + fname + '"'
-        );
-        return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' ');
+            '--log-level error',
+            '--save-dir ' + saveDir,
+        ];
+        const segs = state.segments.slice();
+        if (segs.length === 0) segs.push({ start: '', end: '' });
+        const lines = ['mkdir -p ' + saveDir];
+        segs.forEach(function (seg, i) {
+            const c = base.slice();
+            const s = toHMS(seg.start);
+            const e = toHMS(seg.end);
+            if (seg.start && seg.end && s && e) c.push('--custom-range "' + s + '-' + e + '"');
+            c.push('--save-name "' + baseName + String(i + 1).padStart(2, '0') + '"');
+            lines.push(c.join(' '));
+        });
+        return lines.join('\n');
     }
 
     function copyToClipboard(text) {
@@ -593,6 +595,7 @@
         });
         li.addEventListener('click', () => {
             state.selectedUrl = url;
+            state.segments = [];
             if (!state.fileName) state.fileName = safeName(document.title);
             switchTab(1);
         });
@@ -643,6 +646,7 @@
                 if (type) {
                     handleVideoFound(url.trim(), type);
                     state.selectedUrl = url.trim();
+                    state.segments = [];
                     if (!state.fileName) state.fileName = safeName(document.title);
                     switchTab(1);
                 } else {
@@ -672,11 +676,10 @@
         let timeBlock = '';
         if (isM3U8) {
             timeBlock = `
-                <div class="${C.secTitle}"><span class="${C.secTxt}">── 时间范围 ──</span><span class="${C.secHint}">HHMMSS 6位·清空=全程</span></div>
+                <div class="${C.secTitle}"><span class="${C.secTxt}">── 时间段列表 ──</span><span class="${C.secHint}">HHMMSS 6位·整行留空=整段</span></div>
+                <div id="seg-list"></div>
                 <div class="${C.timeRow}">
-                    <input class="${C.timeInput}" id="start-time" inputmode="numeric" maxlength="6" placeholder="起始" value="${state.startTime}">
-                    <span class="${C.timeSep}">—</span>
-                    <input class="${C.timeInput}" id="end-time" inputmode="numeric" maxlength="6" placeholder="结束" value="${state.endTime}">
+                    <button class="${C.btn}" id="add-seg" type="button">➕ 添加时间段</button>
                 </div>
             `;
         }
@@ -690,17 +693,7 @@
             </div>
         `;
 
-        if (isM3U8) {
-            const st = contentEl.querySelector('#start-time');
-            const et = contentEl.querySelector('#end-time');
-            [st, et].forEach(input => {
-                input.addEventListener('input', () => {
-                    input.value = input.value.replace(/\D/g, '').slice(0, 6);
-                    if (input === st) state.startTime = input.value;
-                    else state.endTime = input.value;
-                });
-            });
-        }
+        if (isM3U8) renderSegmentList();
 
         const fn = contentEl.querySelector('#file-name');
         fn.addEventListener('input', () => {
@@ -711,7 +704,55 @@
         fn.style.height = '0px';
         fn.style.height = Math.min(fn.scrollHeight, 80) + 'px';
 
+        const addBtn = contentEl.querySelector('#add-seg');
+        if (addBtn) {
+            addBtn.addEventListener('click', () => {
+                state.segments.push({ start: '', end: '' });
+                renderSegmentList();
+            });
+        }
+
         contentEl.querySelector('.' + C.picked).addEventListener('click', () => switchTab(0));
+    }
+
+    function renderSegmentList() {
+        const box = contentEl.querySelector('#seg-list');
+        if (!box) return;
+        box.innerHTML = '';
+        if (state.segments.length === 0) {
+            const hint = document.createElement('div');
+            hint.className = C.status;
+            hint.style.textAlign = 'center';
+            hint.style.padding = '8px';
+            hint.textContent = '暂无时间段，将下载整段 (' + safeName(state.fileName || 'clip') + '01)';
+            box.appendChild(hint);
+            return;
+        }
+        state.segments.forEach(function (seg, i) {
+            const row = document.createElement('div');
+            row.className = C.timeRow;
+            row.innerHTML = `
+                <span class="${C.itemName}" style="flex:0 0 auto;color:#888;overflow:visible;">${String(i + 1).padStart(2, '0')}</span>
+                <input class="${C.timeInput}" inputmode="numeric" maxlength="6" placeholder="起始" value="${escapeHtml(seg.start)}">
+                <span class="${C.timeSep}">—</span>
+                <input class="${C.timeInput}" inputmode="numeric" maxlength="6" placeholder="结束" value="${escapeHtml(seg.end)}">
+                <button class="${C.itemCopy}" type="button" title="删除">✕</button>
+            `;
+            const nodes = row.querySelectorAll('input');
+            const del = row.querySelector('button');
+            nodes.forEach((inp, k) => {
+                inp.addEventListener('input', () => {
+                    inp.value = inp.value.replace(/\D/g, '').slice(0, 6);
+                    if (k === 0) state.segments[i].start = inp.value;
+                    else state.segments[i].end = inp.value;
+                });
+            });
+            del.addEventListener('click', () => {
+                state.segments.splice(i, 1);
+                renderSegmentList();
+            });
+            box.appendChild(row);
+        });
     }
 
     function renderTab3() {
@@ -727,13 +768,8 @@
 
         let timeLine = '';
         if (isM3U8) {
-            let timeStr = '全程下载';
-            if (state.startTime && state.endTime) {
-                const s = toHMS(state.startTime);
-                const e = toHMS(state.endTime);
-                if (s && e) timeStr = `${s} - ${e}`;
-            }
-            timeLine = `<div class="${C.sumLine}">⏱ ${timeStr}</div>`;
+            const n = state.segments.length;
+            timeLine = `<div class="${C.sumLine}">⏱ 时间段: ${n || 1} 段</div>`;
         }
 
         const fname = escapeHtml(state.fileName || '(未命名)');

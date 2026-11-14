@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         N_m3u8DL-RE PC端
+// @name         N_m3u8DL-CLI PC端
 // @namespace    http://tampermonkey.net/
 // @version      1.1
 // @description  按先后顺序收集页面多个m3u8/mp4/mpd，批量导出txt，自动标题+数字后缀

@@ -23,44 +23,65 @@ while true; do
     fi
 
     echo -e "\n=====执行 $FILE ====="
+    VIDEO_DIR="/sdcard/Download/videos"
     TMP_OUTPUT=$(mktemp)
-    bash "$FILE" 2>&1 | tee "$TMP_OUTPUT"
-    EXIT_CODE=${PIPESTATUS[0]}
+    BEFORE_LIST=$(mktemp)
+    AFTER_LIST=$(mktemp)
+    ls "$VIDEO_DIR"/*.mp4 2>/dev/null | sort > "$BEFORE_LIST"
+    : > "$TMP_OUTPUT"
+    EXIT_CODE=0
+    FAIL_COUNT=0
+    LINE_NO=0
+    while IFS= read -r CMD; do
+        case "$CMD" in ''|'#'*) continue;; esac
+        LINE_NO=$((LINE_NO + 1))
+        SHOWN=$(printf '%s' "$CMD" | cut -c1-140)
+        if [[ ${#CMD} -gt 140 ]]; then SHOWN="$SHOWN…"; fi
+        echo "▶ [命令$LINE_NO] $SHOWN"
+        eval "$CMD" 2>&1 | tee -a "$TMP_OUTPUT"
+        RC=${PIPESTATUS[0]}
+        if [[ $RC -ne 0 ]]; then
+            EXIT_CODE=$RC
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            echo "   ⚠️ [命令$LINE_NO] 退出码 $RC"
+        fi
+    done < "$FILE"
+    ls "$VIDEO_DIR"/*.mp4 2>/dev/null | sort > "$AFTER_LIST"
+    NEW_FILES=$(comm -13 "$BEFORE_LIST" "$AFTER_LIST")
+    NEW_COUNT=$(grep -c . <<<"$NEW_FILES")
+    EXPECTED=$(grep -cE 'N_m3u8DL-RE|curl ' "$FILE" 2>/dev/null)
 
-    if [[ $EXIT_CODE -eq 0 ]]; then
+    if [[ "$FAIL_COUNT" -eq 0 && "$NEW_COUNT" -ge "$EXPECTED" ]]; then
         IDX=$((IDX + 1))
-        LAST_MP4=$(grep -oE '(\S+_\d+\.mp4)' "$TMP_OUTPUT" 2>/dev/null | tail -1)
-        if [[ -z "$LAST_MP4" ]]; then
-            LAST_MP4=$(find "$DOWNLOAD_DIR" -maxdepth 1 -name '*_*.mp4' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | awk '{print $2}')
-        fi
-        if [[ -n "$LAST_MP4" && "$LAST_MP4" =~ _([0-9]+)\.mp4 ]]; then
-            EP="第${BASH_REMATCH[1]}集"
-        else
-            EP="未识别"
-        fi
+        LAST_MP4=$(printf '%s\n' "$NEW_FILES" | tail -1)
+        [[ -z "$LAST_MP4" ]] && LAST_MP4=$(ls "$VIDEO_DIR"/*.mp4 2>/dev/null | tail -1)
         LOG="$SUCCESS_DIR/success.log"
         {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
             echo "序号: $IDX"
-            echo "集数: $EP"
+            echo "产出: $NEW_COUNT / $EXPECTED"
             echo "下载文件: $(basename "$LAST_MP4")"
             echo "执行脚本: $(basename "$FILE")"
-            echo "完成情况: 成功 (退出码=0)"
+            echo "完成情况: 成功 (成片数符合预期)"
             echo "------------------------"
         } >> "$LOG"
-        echo "✅执行成功"
-        echo "📥 下载完成！集数: $EP，文件: $(basename "$LAST_MP4")"
+        echo "✅执行成功，产出 $NEW_COUNT 个视频"
+        echo "📥 下载完成！最新文件: $(basename "$LAST_MP4")"
     else
         LOG="$FAIL_DIR/fail_$(basename "$FILE").log"
         {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
             echo "执行脚本: $(basename "$FILE")"
-            echo "退出码: $EXIT_CODE"
-            echo "报错消息:"
-            cat "$TMP_OUTPUT"
+            echo "失败行数: $FAIL_COUNT | 最近退出码: $EXIT_CODE"
+            echo "预期产出: $EXPECTED 个 | 实际产出: $NEW_COUNT 个"
+            echo "本次新增文件:"
+            echo "$NEW_FILES"
+            echo "N_m3u8DL-RE 输出末尾:"
+            tail -n 50 "$TMP_OUTPUT"
         } > "$LOG"
-        echo "❌执行失败，退出码: $EXIT_CODE，详情见 $LOG"
+        echo "❌执行未完成：预期 $EXPECTED 个，实际 $NEW_COUNT 个，详情见 $LOG"
     fi
+    rm -f "$BEFORE_LIST" "$AFTER_LIST"
 
     rm -f "$TMP_OUTPUT"
     rm -f "$FILE"
@@ -78,3 +99,4 @@ done
 echo "🎉 全部处理完毕，共执行 $IDX 个文件"
 EOF
 chmod +x c
+
