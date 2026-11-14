@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE PC端
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  按先后顺序收集页面多个m3u8/mp4/mpd，批量导出txt，自动标题+数字后缀
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -12,9 +12,6 @@
 
 (function () {
     'use strict';
-
-    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-    const isAndroid = /Android/i.test(navigator.userAgent);
 
     const _tag = 'm' + Math.random().toString(36).slice(2, 8);
     const _MSG_KEY = '__' + _tag;
@@ -240,59 +237,16 @@
         if (/《([^》]+)》/.test(name)) {
             name = name.match(/《([^》]+)》/)[1];
         } else {
-            name = name.replace(/[-_][0-9]+$/, '');
+            const dashIdx = name.indexOf('-');
+            if (dashIdx > 0) {
+                name = name.slice(0, dashIdx);
+            }
         }
         return safeName(name);
     }
 
     function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    }
-
-    function buildSingleCommand(item, index, fname, dirPath) {
-        const url = item.url;
-        const type = item.type;
-        const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
-        const ref = state.referer || location.href;
-
-        if (type === 'mp4') {
-            const parts = [
-                'curl -L "' + url + '"',
-                '-H "User-Agent: ' + ua + '"',
-                '-H "Referer: ' + ref + '"',
-                '--connect-timeout 15',
-                '--retry 3',
-                '--retry-delay 2',
-                '-o "' + dirPath + '/' + fname + '.mp4"'
-            ];
-            return parts.join(' \\\n  ');
-        }
-
-        if (type === 'mpd') {
-            const parts = [
-                '~/test/N_m3u8DL-RE "' + url + '"',
-                '-H "User-Agent: ' + ua + '"',
-                '-H "Referer: ' + ref + '"',
-                '--thread-count 8',
-                '--download-retry-count 5',
-                '--log-level error',
-                '--save-dir "' + dirPath + '"',
-                '--save-name "' + fname + '"'
-            ];
-            return parts.join(' ');
-        }
-
-        const parts = [
-            '~/test/N_m3u8DL-RE "' + url + '"',
-            '-H "User-Agent: ' + ua + '"',
-            '-H "Referer: ' + ref + '"',
-            '--thread-count 8',
-            '--download-retry-count 5',
-            '--log-level error',
-            '--save-dir "' + dirPath + '"',
-            '--save-name "' + fname + '"'
-        ];
-        return parts.join(' ');
     }
 
     function buildBatchText() {
@@ -336,15 +290,6 @@
     }
 
     function downloadTxt(content, filename) {
-        if (isIOS) {
-            const url = 'data:text/plain;charset=utf-8,' + encodeURIComponent(content);
-            const w = window.open(url, '_blank');
-            if (!w) {
-                location.href = url;
-            }
-            showToast('iOS: 长按文本 → 存储到文件');
-            return;
-        }
         try {
             const blob = new Blob([content], { type: 'text/plain' });
             const a = document.createElement('a');
@@ -570,7 +515,6 @@
         a.href = url;
         a.download = filename;
         a.rel = 'noopener';
-        if (isIOS) a.target = '_blank';
         a.style.display = 'none';
         document.body.appendChild(a);
         a.click();

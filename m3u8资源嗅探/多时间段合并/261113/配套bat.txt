@@ -1,0 +1,45 @@
+@echo off
+chcp 65001
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
+
+set "TXT_DIR=C:\Users\sjopfops\Downloads"
+
+echo ==============================================
+echo 程序目录：%cd%
+echo 扫描目录：%TXT_DIR%
+echo ==============================================
+pause >nul
+
+if not exist "%TXT_DIR%" (
+    echo ❌ 目录不存在
+    pause
+    exit /b
+)
+
+for /f "delims=" %%f in ('dir /b /on "%TXT_DIR%\*.txt" 2^>nul') do (
+    set "TXT_FULL=!TXT_DIR!\%%f"
+    echo.
+    echo ==============================================
+    echo 正在处理：%%f
+    echo 文件路径：!TXT_FULL!
+    echo ==============================================
+
+    for /f "usebackq delims=" %%L in ("!TXT_FULL!") do (
+        if not "%%L"=="" (
+            echo 执行命令：[%%L]
+            %%L
+            echo --------------------------------
+        )
+    )
+
+    echo ✅ %%f 执行完毕，准备删除
+    del "!TXT_FULL!"
+    echo 🗑️ 已删除 %%f
+    echo.
+)
+
+echo ==============================================
+echo ✅ 所有txt任务处理并删除完成
+echo ==============================================
+pause
