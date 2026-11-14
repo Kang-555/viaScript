@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         N_m3u8DL-RE 批量收集生成器
+// @name         N_m3u8DL-RE安卓
 // @namespace    http://tampermonkey.net/
-// @version      6.1
+// @version      2.0
 // @description  按先后顺序收集页面多个m3u8/mp4/mpd，批量导出txt，自动标题+数字后缀
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -232,7 +232,7 @@
     }
 
     function safeName(s) {
-        return String(s || 'clip').replace(/[\\/:*?"<>|]/g, '_');
+        return String(s || 'clip').replace(/[\\/:*?"<>|]/g, '');
     }
 
     function processBaseName(base) {
@@ -240,7 +240,7 @@
         if (/《([^》]+)》/.test(name)) {
             name = name.match(/《([^》]+)》/)[1];
         } else {
-            name = name.replace(/[-_][0-9]+$/, '');
+            name = name.split('-')[0];
         }
         return safeName(name);
     }
@@ -301,7 +301,7 @@
         const lines = [];
         lines.push('mkdir -p "' + dirPath + '"');
         state.sniffedUrls.forEach((it, idx) => {
-            const fname = base + '_' + (idx + 1);
+            const fname = base + '_' + String(idx + 1).padStart(2, '0');
             lines.push('# ===== 第' + (idx + 1) + '条 =====');
             lines.push(buildSingleCommand(it, idx, fname, dirPath));
             lines.push('');

@@ -23,7 +23,9 @@ while true; do
     fi
 
     echo -e "\n=====执行 $FILE ====="
-    VIDEO_DIR="/sdcard/Download/videos"
+    VIDEO_DIR=$(grep -m1 -oE '"[^"]+"' "$FILE" | head -1 | tr -d '"')
+    [[ -z "$VIDEO_DIR" ]] && VIDEO_DIR="/sdcard/Download/videos"
+    mkdir -p "$VIDEO_DIR"
     TMP_OUTPUT=$(mktemp)
     BEFORE_LIST=$(mktemp)
     AFTER_LIST=$(mktemp)
@@ -35,9 +37,8 @@ while true; do
     while IFS= read -r CMD; do
         case "$CMD" in ''|'#'*) continue;; esac
         LINE_NO=$((LINE_NO + 1))
-        SHOWN=$(printf '%s' "$CMD" | cut -c1-140)
-        if [[ ${#CMD} -gt 140 ]]; then SHOWN="$SHOWN…"; fi
-        echo "▶ [命令$LINE_NO] $SHOWN"
+        echo
+        echo "▶ [命令$LINE_NO] $CMD"
         eval "$CMD" 2>&1 | tee -a "$TMP_OUTPUT"
         RC=${PIPESTATUS[0]}
         if [[ $RC -ne 0 ]]; then
@@ -51,7 +52,7 @@ while true; do
     NEW_COUNT=$(grep -c . <<<"$NEW_FILES")
     EXPECTED=$(grep -cE 'N_m3u8DL-RE|curl ' "$FILE" 2>/dev/null)
 
-    if [[ "$FAIL_COUNT" -eq 0 && "$NEW_COUNT" -ge "$EXPECTED" ]]; then
+    if [[ "$NEW_COUNT" -ge "$EXPECTED" && "$EXPECTED" -gt 0 ]]; then
         IDX=$((IDX + 1))
         LAST_MP4=$(printf '%s\n' "$NEW_FILES" | tail -1)
         [[ -z "$LAST_MP4" ]] && LAST_MP4=$(ls "$VIDEO_DIR"/*.mp4 2>/dev/null | tail -1)
@@ -99,4 +100,3 @@ done
 echo "🎉 全部处理完毕，共执行 $IDX 个文件"
 EOF
 chmod +x c
-

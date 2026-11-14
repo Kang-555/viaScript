@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         多时间段批量 PC端
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @description  多时间段批量PC端下载，配合bat文件
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -313,7 +313,7 @@
 
     const C = CSS_CLASSES;
     const CSS = `
-    .${C.root}{position:fixed;bottom:calc(3px + env(safe-area-inset-bottom));left:10px;z-index:999999;width:min(340px,calc(100vw - 20px));max-height:40vh;height:auto;border-radius:6px;border:1px solid #4caf50;background:rgba(0,0,0,0.85);color:#fff;font-size:11px;font-family:sans-serif;display:flex;flex-direction:column;overflow:hidden;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);transition:bottom .15s ease;align-self:flex-start;}
+    .${C.root}{position:fixed;right:10px;bottom:calc(3px + env(safe-area-inset-bottom));z-index:999999;width:min(340px,calc(100vw - 20px));max-height:40vh;height:auto;border-radius:6px;border:1px solid #4caf50;background:rgba(0,0,0,0.85);color:#fff;font-size:11px;font-family:sans-serif;display:flex;flex-direction:column;overflow:hidden;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);align-self:flex-start;box-sizing:border-box;}
     .${C.root}.${C.hidden}{display:none;}
     .${C.tabHeader}{display:flex;background:rgba(255,255,255,0.06);border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0;}
     .${C.tabBtn}{flex:1;padding:7px 4px;background:transparent;color:#aaa;border:none;border-bottom:2px solid transparent;cursor:pointer;font-size:11px;transition:all .15s;-webkit-tap-highlight-color:transparent;}
@@ -337,7 +337,7 @@
     .${C.itemDl}{background:rgba(76,175,80,0.35);border:1px solid #4caf50;color:#4caf50;font-size:11px;padding:2px 5px;border-radius:3px;cursor:pointer;flex-shrink:0;-webkit-tap-highlight-color:transparent;touch-action:manipulation;line-height:1.2;}
     .${C.itemDl}:active{background:rgba(76,175,80,0.6);color:#000;}
     .${C.empty}{text-align:center;padding:16px;color:#666;}
-    .${C.status}{padding:4px 8px;border-top:1px solid rgba(255,255,255,0.06);color:#aaa;font-size:10px;flex-shrink:0;}
+    .${C.status}{padding:4px 8px;border-top:1px solid rgba(255,255,255,0.06);color:#aaa;font-size:10px;flex-shrink:0;cursor:move;touch-action:none;user-select:none;-webkit-user-select:none;}
     .${C.picked}{padding:8px;background:rgba(76,175,80,0.1);border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;color:#4caf50;font-weight:bold;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .${C.secTitle}{padding:6px 8px;color:#888;font-size:10px;border-bottom:1px solid rgba(255,255,255,0.06);margin-top:4px;display:flex;align-items:center;justify-content:space-between;}
     .${C.secTitle} .${C.secTxt}{color:#888;}
@@ -365,6 +365,42 @@
     let shadowRoot, rootEl, contentEl, statusEl;
     let restoreBtnEl;
     let _hostId = _tag + '-h';
+
+    function initDrag(panel) {
+        const handle = panel.querySelector('.' + C.status);
+        if (!handle) return;
+        let dragging = false;
+        let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+        handle.addEventListener('pointerdown', (e) => {
+            dragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = panel.getBoundingClientRect();
+            startLeft = rect.left;
+            startTop = rect.top;
+            panel.style.bottom = 'auto';
+            panel.style.right = 'auto';
+            panel.style.left = startLeft + 'px';
+            panel.style.top = startTop + 'px';
+            handle.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            let nx = startLeft + (e.clientX - startX);
+            let ny = startTop + (e.clientY - startY);
+            nx = Math.max(0, Math.min(nx, window.innerWidth - panel.offsetWidth));
+            ny = Math.max(0, Math.min(ny, window.innerHeight - panel.offsetHeight));
+            panel.style.left = nx + 'px';
+            panel.style.top = ny + 'px';
+        });
+
+        const endDrag = () => { dragging = false; };
+        handle.addEventListener('pointerup', endDrag);
+        handle.addEventListener('pointercancel', endDrag);
+    }
 
     function initPanel() {
         if (shadowRoot) return;
@@ -398,6 +434,8 @@
         `;
         shadowRoot.appendChild(rootEl);
 
+        initDrag(rootEl);
+
         restoreBtnEl = document.createElement('button');
         restoreBtnEl.className = C.restoreBtn;
         restoreBtnEl.textContent = '⬇';
@@ -421,7 +459,6 @@
 
         renderTab();
         renderStatus();
-        setupViewportAdjust();
 
         if (typeof GM_registerMenuCommand === 'function') {
             try {
@@ -430,19 +467,6 @@
                     restoreBtnEl.classList.toggle(C.restoreShow);
                 });
             } catch (e) { }
-        }
-    }
-
-    function setupViewportAdjust() {
-        if (window.visualViewport) {
-            const update = () => {
-                const offset = window.innerHeight - window.visualViewport.height;
-                if (rootEl) {
-                    rootEl.style.bottom = `calc(3px + env(safe-area-inset-bottom) + ${Math.max(0, offset)}px)`;
-                }
-            };
-            window.visualViewport.addEventListener('resize', update);
-            window.visualViewport.addEventListener('scroll', update);
         }
     }
 
