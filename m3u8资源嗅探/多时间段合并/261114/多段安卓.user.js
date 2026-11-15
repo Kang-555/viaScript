@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE多时间段安卓
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      3.0
 // @description  多时间段批量安卓下载，配合termux文件
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -269,7 +269,8 @@
                 '-H "Referer: ' + ref + '"',
                 '--thread-count 8',
                 '--download-retry-count 5',
-                '--log-level error',
+                '--log-level info',
+                '--auto-select',
                 '--save-dir "' + dirPath + '"',
             ];
             const s = toHMS(seg.start);
@@ -672,6 +673,8 @@
         const urlName = escapeHtml((state.selectedUrl.split('/').pop().split('?')[0]) || state.selectedUrl);
         const isM3U8 = type !== 'mp4';
 
+        if (isM3U8 && state.segments.length === 0) state.segments = [{ start: '', end: '' }];
+
         let timeBlock = '';
         if (isM3U8) {
             timeBlock = `
@@ -748,6 +751,7 @@
             });
             del.addEventListener('click', () => {
                 state.segments.splice(i, 1);
+                if (state.segments.length === 0) state.segments = [{ start: '', end: '' }];
                 renderSegmentList();
             });
             box.appendChild(row);
