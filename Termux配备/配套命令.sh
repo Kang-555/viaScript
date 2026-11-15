@@ -23,7 +23,7 @@ while true; do
     fi
 
     echo -e "\n=====执行 $FILE ====="
-    VIDEO_DIR=$(grep -m1 -oE '"[^"]+"' "$FILE" | head -1 | tr -d '"')
+    VIDEO_DIR=$(grep -oE -- '--save-dir ("[^"]*"|[^ ]+)' "$FILE" | head -1 | sed -E 's/^--save-dir[[:space:]]+"?//; s/"$//')
     [[ -z "$VIDEO_DIR" ]] && VIDEO_DIR="/sdcard/Download/videos"
     mkdir -p "$VIDEO_DIR"
     TMP_OUTPUT=$(mktemp)

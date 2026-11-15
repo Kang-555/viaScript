@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         N_m3u8DL-CLI PC端
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  按先后顺序收集页面多个m3u8/mp4/mpd，批量导出txt，自动标题+数字后缀
+// @version      2.1
+// @description  短视频完整资源嗅探PC端，配合bat文件批量下载
 // @match        *://*/*
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
@@ -64,6 +64,10 @@
     const M3U8_REGEX = /\.m3u8($|\?)|application\/.*mpegurl/i;
     const MP4_REGEX = /\.mp4(\?|$)/i;
     const MPD_REGEX = /\.mpd($|\?)/i;
+
+    const EXE = 'N_m3u8DL-CLI_v3.0.2.exe';
+    const WORK_DIR = 'C:\\Users\\sjopfops\\Downloads';
+    const COMMON_FLAGS = ['--enableBinaryMerge', '--enableDelAfterDone', '--noProxy'];
 
     function detectType(url, contentType) {
         // 直接排除 m4s 分片文件
@@ -249,14 +253,31 @@
         return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    function buildCommandFor(url, fname) {
+        const full = processBaseName(state.baseName || document.title);
+        const parts = [
+            '"' + EXE + '"',
+            '"' + url + '"',
+            '--workDir "' + WORK_DIR + '\\' + full + '"',
+            '--saveName "' + fname + '"'
+        ];
+        parts.push(COMMON_FLAGS.join(' '));
+        return parts.join(' ');
+    }
+
     function buildBatchText() {
-        const base = processBaseName(state.baseName || document.title);
+        const full = processBaseName(state.baseName || document.title);
         const lines = [];
         state.sniffedUrls.forEach((it, idx) => {
-            const fname = base + '_' + (idx + 1);
-            lines.push(it.url + ' ' + fname);
+            lines.push(buildCommandFor(it.url, full + '_' + (idx + 1)));
         });
         return lines.join('\n');
+    }
+
+    function buildBatText() {
+        const full = processBaseName(state.baseName || document.title);
+        const cmds = buildBatchText().split('\n');
+        return ['md "' + WORK_DIR + '\\' + full + '"'].concat(cmds).join('\n');
     }
 
     function copyToClipboard(text) {
@@ -331,7 +352,7 @@
     .${C.itemDl}{background:rgba(76,175,80,0.35);border:1px solid #4caf50;color:#4caf50;font-size:10px;padding:2px 4px;border-radius:3px;cursor:pointer;flex-shrink:0;-webkit-tap-highlight-color:transparent;line-height:1.2;}
     .${C.itemDel}{background:rgba(244,67,54,0.35);border:1px solid #f44336;color:#f44336;font-size:10px;padding:2px 4px;border-radius:3px;cursor:pointer;flex-shrink:0;-webkit-tap-highlight-color:transparent;line-height:1.2;}
     .${C.empty}{text-align:center;padding:16px;color:#666;}
-    .${C.status}{padding:4px 8px;border-top:1px solid rgba(255,255,255,0.06);color:#aaa;font-size:10px;flex-shrink:0;}
+    .${C.status}{padding:4px 8px;border-top:1px solid rgba(255,255,255,0.06);color:#aaa;font-size:10px;flex-shrink:0;cursor:move;touch-action:none;user-select:none;-webkit-user-select:none;}
     .${C.secTitle}{padding:6px 8px;color:#888;font-size:10px;border-bottom:1px solid rgba(255,255,255,0.06);margin-top:4px;display:flex;align-items:center;justify-content:space-between;}
     .${C.secTxt}{color:#888;}
     .${C.fileRow}{padding:4px 8px 8px;}
@@ -350,6 +371,41 @@
     let shadowRoot, rootEl, contentEl, statusEl;
     let restoreBtnEl;
     let _hostId = _tag + '-h';
+
+    function initDrag(panel) {
+        const handle = panel.querySelector('.' + C.status);
+        if (!handle) return;
+        let dragging = false;
+        let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+        handle.addEventListener('pointerdown', (e) => {
+            dragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = panel.getBoundingClientRect();
+            startLeft = rect.left;
+            startTop = rect.top;
+            panel.style.bottom = 'auto';
+            panel.style.left = startLeft + 'px';
+            panel.style.top = startTop + 'px';
+            handle.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            let nx = startLeft + (e.clientX - startX);
+            let ny = startTop + (e.clientY - startY);
+            nx = Math.max(0, Math.min(nx, window.innerWidth - panel.offsetWidth));
+            ny = Math.max(0, Math.min(ny, window.innerHeight - panel.offsetHeight));
+            panel.style.left = nx + 'px';
+            panel.style.top = ny + 'px';
+        });
+
+        const endDrag = () => { dragging = false; };
+        handle.addEventListener('pointerup', endDrag);
+        handle.addEventListener('pointercancel', endDrag);
+    }
 
     function initPanel() {
         if (shadowRoot) return;
@@ -381,6 +437,8 @@
             <div class="${C.status}">共 0 个 | 过滤 &lt;512KB | 嗅探中...</div>
         `;
         shadowRoot.appendChild(rootEl);
+
+        initDrag(rootEl);
 
         restoreBtnEl = document.createElement('button');
         restoreBtnEl.className = C.restoreBtn;
@@ -421,7 +479,7 @@
         if (window.visualViewport) {
             const update = () => {
                 const offset = window.innerHeight - window.visualViewport.height;
-                if (rootEl) {
+                if (rootEl && !rootEl.style.top) {
                     rootEl.style.bottom = `calc(3px + env(safe-area-inset-bottom) + ${Math.max(0, offset)}px)`;
                 }
             };
@@ -618,7 +676,7 @@
             return;
         }
         if (!state.baseName) state.baseName = safeName(document.title);
-        const previewText = buildBatchText();
+        const previewText = buildBatText();
 
         contentEl.innerHTML = `
             <div class="${C.summary}">
@@ -628,11 +686,11 @@
             <div class="${C.fileRow}">
                 <textarea class="${C.fileInput}" id="base-name">${escapeHtml(state.baseName)}</textarea>
             </div>
-            <div class="${C.secTitle}"><span class="${C.secTxt}">批量命令预览</span></div>
+            <div class="${C.secTitle}"><span class="${C.secTxt}">执行命令预览（txt）</span></div>
             <textarea class="${C.cmdBox}" readonly>${escapeHtml(previewText)}</textarea>
             <div class="${C.btnRow}">
-                <button class="${C.btn} ${C.btnPrimary}" id="copy-batch">📋 复制全部</button>
-                <button class="${C.btn}" id="download-batch">💾 导出 batch.txt</button>
+                <button class="${C.btn} ${C.btnPrimary}" id="copy-batch">📋 复制命令</button>
+                <button class="${C.btn}" id="download-batch">💾 下载 .txt</button>
             </div>
         `;
         const baseInput = contentEl.querySelector('#base-name');
@@ -641,11 +699,11 @@
             renderTabBatch();
         });
         contentEl.querySelector('#copy-batch').addEventListener('click', () => {
-            const txt = buildBatchText();
-            copyToClipboard(txt).then(ok => showToast(ok ? '批量命令已复制' : '复制失败'));
+            const txt = buildBatText();
+            copyToClipboard(txt).then(ok => showToast(ok ? '执行命令已复制' : '复制失败'));
         });
         contentEl.querySelector('#download-batch').addEventListener('click', () => {
-            const txt = buildBatchText();
+            const txt = buildBatText();
             downloadTxt(txt, processBaseName(state.baseName || document.title) + '.txt');
         });
     }

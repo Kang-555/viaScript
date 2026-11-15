@@ -9,11 +9,9 @@ echo ==============================================
 echo 程序目录：%cd%
 echo 扫描目录：%TXT_DIR%
 echo ==============================================
-pause >nul
 
 if not exist "%TXT_DIR%" (
     echo ❌ 目录不存在
-    pause
     exit /b
 )
 
@@ -37,9 +35,11 @@ for /f "delims=" %%f in ('dir /b /on "%TXT_DIR%\*.txt" 2^>nul') do (
     del "!TXT_FULL!"
     echo 🗑️ 已删除 %%f
     echo.
+    choice /c yn /t 10 /d y /m "是否处理下一个txt？[Y=继续 / N=结束 / 10秒超时默认继续]"
+    if errorlevel 2 goto :end_all
 )
+:end_all
 
 echo ==============================================
 echo ✅ 所有txt任务处理并删除完成
 echo ==============================================
-pause

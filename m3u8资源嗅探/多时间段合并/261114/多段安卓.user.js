@@ -256,7 +256,7 @@
                 '--retry-delay 2',
                 '-o ' + VIDEOS_DIR + '/' + mp4Name
             ];
-            return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' \\\n  ');
+            return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' ');
         }
 
         const saveDir = VIDEOS_DIR;
@@ -267,7 +267,7 @@
             '-H "Referer: ' + ref + '"',
             '--thread-count 8',
             '--download-retry-count 5',
-            '--log-level error',
+            '--log-level info',
             '--save-dir ' + saveDir,
         ];
         const segs = state.segments.slice();
