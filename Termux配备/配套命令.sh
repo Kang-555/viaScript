@@ -29,7 +29,7 @@ while true; do
     TMP_OUTPUT=$(mktemp)
     BEFORE_LIST=$(mktemp)
     AFTER_LIST=$(mktemp)
-    ls "$VIDEO_DIR"/*.mp4 2>/dev/null | sort > "$BEFORE_LIST"
+    ls "$VIDEO_DIR"/*.mp4 "$VIDEO_DIR"/*.mkv "$VIDEO_DIR"/*.ts 2>/dev/null | sort > "$BEFORE_LIST"
     : > "$TMP_OUTPUT"
     EXIT_CODE=0
     FAIL_COUNT=0
@@ -47,7 +47,7 @@ while true; do
             echo "   ⚠️ [命令$LINE_NO] 退出码 $RC"
         fi
     done < "$FILE"
-    ls "$VIDEO_DIR"/*.mp4 2>/dev/null | sort > "$AFTER_LIST"
+    ls "$VIDEO_DIR"/*.mp4 "$VIDEO_DIR"/*.mkv "$VIDEO_DIR"/*.ts 2>/dev/null | sort > "$AFTER_LIST"
     NEW_FILES=$(comm -13 "$BEFORE_LIST" "$AFTER_LIST")
     NEW_COUNT=$(grep -c . <<<"$NEW_FILES")
     EXPECTED=$(grep -cE 'N_m3u8DL-RE|curl ' "$FILE" 2>/dev/null)
@@ -55,7 +55,7 @@ while true; do
     if [[ "$NEW_COUNT" -ge "$EXPECTED" && "$EXPECTED" -gt 0 ]]; then
         IDX=$((IDX + 1))
         LAST_MP4=$(printf '%s\n' "$NEW_FILES" | tail -1)
-        [[ -z "$LAST_MP4" ]] && LAST_MP4=$(ls "$VIDEO_DIR"/*.mp4 2>/dev/null | tail -1)
+        [[ -z "$LAST_MP4" ]] && LAST_MP4=$(ls "$VIDEO_DIR"/*.mp4 "$VIDEO_DIR"/*.mkv "$VIDEO_DIR"/*.ts 2>/dev/null | tail -1)
         LOG="$SUCCESS_DIR/success.log"
         {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')]"

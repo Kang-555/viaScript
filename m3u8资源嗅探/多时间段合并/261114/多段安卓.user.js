@@ -241,12 +241,11 @@
         const type = item ? item.type : 'm3u8';
         const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
         const ref = state.referer || location.href;
-        const fname = state.fileName || 'clip';
+        const baseName = safeName(state.fileName || 'clip');
+        const dirPath = '/sdcard/Download/' + baseName;
 
-        const VIDEOS_DIR = '/sdcard/Download/videos';
-
+        // MP4：无时间拆分，整段下载（与短视频完整同格式）
         if (type === 'mp4') {
-            const mp4Name = safeName(fname) + '.mp4';
             const parts = [
                 'curl -L "' + state.selectedUrl + '"',
                 '-H "User-Agent: ' + ua + '"',
@@ -254,32 +253,32 @@
                 '--connect-timeout 15',
                 '--retry 3',
                 '--retry-delay 2',
-                '-o ' + VIDEOS_DIR + '/' + mp4Name
+                '-o "' + dirPath + '/' + baseName + '.mp4"'
             ];
-            return 'mkdir -p ' + VIDEOS_DIR + '\n' + parts.join(' ');
+            return 'mkdir -p "' + dirPath + '"\n' + parts.join(' ');
         }
 
-        const saveDir = VIDEOS_DIR;
-        const baseName = safeName(fname);
-        const base = [
-            '~/test/N_m3u8DL-RE "' + state.selectedUrl + '"',
-            '-H "User-Agent: ' + ua + '"',
-            '-H "Referer: ' + ref + '"',
-            '--thread-count 8',
-            '--download-retry-count 5',
-            '--log-level info',
-            '--save-dir ' + saveDir,
-        ];
+        // M3U8/MPD：按时间段拆分，每段一条命令（与短视频完整同格式，仅新增 --custom-range）
+        const lines = ['mkdir -p "' + dirPath + '"'];
         const segs = state.segments.slice();
         if (segs.length === 0) segs.push({ start: '', end: '' });
-        const lines = ['mkdir -p ' + saveDir];
         segs.forEach(function (seg, i) {
-            const c = base.slice();
+            const base = [
+                '~/test/N_m3u8DL-RE "' + state.selectedUrl + '"',
+                '-H "User-Agent: ' + ua + '"',
+                '-H "Referer: ' + ref + '"',
+                '--thread-count 8',
+                '--download-retry-count 5',
+                '--log-level error',
+                '--save-dir "' + dirPath + '"',
+            ];
             const s = toHMS(seg.start);
             const e = toHMS(seg.end);
-            if (seg.start && seg.end && s && e) c.push('--custom-range "' + s + '-' + e + '"');
-            c.push('--save-name "' + baseName + String(i + 1).padStart(2, '0') + '"');
-            lines.push(c.join(' '));
+            if (seg.start && seg.end && s && e) base.push('--custom-range "' + s + '-' + e + '"');
+            base.push('--save-name "' + baseName + String(i + 1).padStart(2, '0') + '"');
+            lines.push('# ===== 第' + (i + 1) + '段 =====');
+            lines.push(base.join(' '));
+            lines.push('');
         });
         return lines.join('\n');
     }
