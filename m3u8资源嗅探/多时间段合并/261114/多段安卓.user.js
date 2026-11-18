@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N_m3u8DL-RE多时间段安卓
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  多时间段批量安卓下载，配合termux文件
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -14,7 +14,6 @@
     'use strict';
 
     const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-    const isAndroid = /Android/i.test(navigator.userAgent);
 
     const _tag = 'm' + Math.random().toString(36).slice(2, 8);
     const _MSG_KEY = '__' + _tag;
@@ -60,6 +59,9 @@
         restoreShow: _tag + '-rb-s',
     };
 
+    const M3U8_REGEX = /\.m3u8($|\?)|application\/.*mpegurl/i;
+    const MP4_REGEX = /\.mp4(\?|$)/i;
+
     const state = {
         sniffedUrls: [],
         sniffedSet: new Set(),
@@ -73,23 +75,28 @@
         lastBuilt: '',
     };
 
-    const M3U8_REGEX = /\.m3u8($|\?)|application\/.*mpegurl/i;
-    const MP4_REGEX = /\.mp4(\?|$)/i;
+    let _initialized = false;
+    let _tryRunIntervalId = null;
+
+    // ========== 类型识别 ==========
 
     function detectType(url, contentType) {
         if (MP4_REGEX.test(url)) return 'mp4';
         if (M3U8_REGEX.test(url)) return 'm3u8';
         if (contentType) {
             if (/video\/mp4/i.test(contentType)) return 'mp4';
-            if (/mpegurl|mpegurl/i.test(contentType)) return 'm3u8';
+            if (/mpegurl/i.test(contentType)) return 'm3u8';   // 原代码重复了同正则两次，合并
         }
         return null;
     }
+
+    // ========== 嗅探 ==========
 
     function startSniffer() {
         const captureReferer = () => { state.referer = location.href; };
         captureReferer();
 
+        // 1. XHR hook
         try {
             const origOpen = XMLHttpRequest.prototype.open;
             XMLHttpRequest.prototype.open = function (method, url, async) {
@@ -106,6 +113,7 @@
             };
         } catch (e) { }
 
+        // 2. fetch hook
         const origFetch = window.fetch;
         if (origFetch) {
             window.fetch = async function (...args) {
@@ -125,30 +133,30 @@
             };
         }
 
+        // 3. PerformanceObserver（一次性扫描 + list.getEntries 增量，比每次全量 getEntriesByType 高效）
         if (window.performance && typeof PerformanceObserver !== 'undefined') {
             try {
-                const scan = () => {
-                    performance.getEntriesByType('resource').forEach(entry => {
+                performance.getEntriesByType('resource').forEach(entry => {
+                    const type = detectType(entry.name, '');
+                    if (type && !state.visitedRes.has(entry.name)) {
+                        state.visitedRes.add(entry.name);
+                        handleVideoFound(entry.name, type);
+                    }
+                });
+                const ob = new PerformanceObserver(list => {
+                    list.getEntries().forEach(entry => {
                         if (state.visitedRes.has(entry.name)) return;
                         state.visitedRes.add(entry.name);
                         const type = detectType(entry.name, '');
                         if (type) handleVideoFound(entry.name, type);
                     });
-                };
-                scan();
-                const ob = new PerformanceObserver(scan);
+                });
                 ob.observe({ entryTypes: ['resource'] });
-            } catch (e) {
-                try {
-                    performance.getEntriesByType('resource').forEach(entry => {
-                        const type = detectType(entry.name, '');
-                        if (type) handleVideoFound(entry.name, type);
-                    });
-                } catch (ee) { }
-            }
+            } catch (e) { }
         }
 
-        const scanDOM = () => {
+        // 4. DOM 遍历 + MutationObserver（加 debounce 避免 SPA 高频变动卡顿）
+        const scanDOMNow = () => {
             document.querySelectorAll('video, source').forEach(el => {
                 let src = el.getAttribute('src') || el.currentSrc || '';
                 if (!src || src.startsWith('blob:')) return;
@@ -161,18 +169,22 @@
                 }
             });
         };
-        scanDOM();
+        let scanTimer = null;
+        const scanDOM = () => {
+            if (scanTimer) clearTimeout(scanTimer);
+            scanTimer = setTimeout(scanDOMNow, 250);
+        };
+        scanDOMNow();
         if (document.body) {
             const mo = new MutationObserver(() => scanDOM());
             mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
         }
 
+        // 5. GM_webRequest（原 4 条重复 selector 合并为 2 条通配）
         try {
             GM_webRequest([
-                { selector: '*://*/*.m3u8*', action: { redirect: { from: '(.*)', to: '$1' } } },
                 { selector: '*://*/*m3u8*', action: { redirect: { from: '(.*)', to: '$1' } } },
-                { selector: '*://*/*.mp4*', action: { redirect: { from: '(.*)', to: '$1' } } },
-                { selector: '*://*/*mp4*', action: { redirect: { from: '(.*)', to: '$1' } } },
+                { selector: '*://*/*mp4*',   action: { redirect: { from: '(.*)', to: '$1' } } },
             ], function (info, message, details) {
                 if (details && details.url) {
                     const type = detectType(details.url, '');
@@ -181,18 +193,21 @@
             });
         } catch (e) { }
 
-        const _wrapHistory = (type) => {
-            const orig = history[type];
-            history[type] = function () {
-                const rv = orig.apply(this, arguments);
-                captureReferer();
-                scanDOM();
-                window.dispatchEvent(new Event(type));
-                return rv;
-            };
-        };
-        try { _wrapHistory('pushState'); _wrapHistory('replaceState'); } catch (e) { }
+        // 6. history pushState/replaceState hook（原两个 wrapHistory 调用重复，合并成 forEach 一次）
+        try {
+            ['pushState', 'replaceState'].forEach(type => {
+                const orig = history[type];
+                history[type] = function () {
+                    const rv = orig.apply(this, arguments);
+                    captureReferer();
+                    scanDOMNow();
+                    window.dispatchEvent(new Event(type));
+                    return rv;
+                };
+            });
+        } catch (e) { }
 
+        // 7. postMessage（iframe → top 转发）
         window.addEventListener('message', (ev) => {
             if (ev.data && typeof ev.data === 'string') {
                 const type = detectType(ev.data, '');
@@ -201,13 +216,13 @@
         }, true);
     }
 
+    // ========== 嗅探到视频统一入口 ==========
+
     function handleVideoFound(url, type) {
         if (window.self !== window.top) {
             try {
                 window.top.postMessage({
-                    [_MSG_KEY]: true,
-                    url: url,
-                    type: type,
+                    [_MSG_KEY]: true, url: url, type: type,
                     referer: state.referer || location.href
                 }, '*');
             } catch (e) { }
@@ -220,6 +235,10 @@
         appendSniffedItem();
         renderStatus();
     }
+
+    // ========== 命令生成 ==========
+
+    const UA_ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
 
     function safeName(s) {
         return String(s || 'clip').replace(/[\\/:*?"<>|]/g, '_');
@@ -237,40 +256,35 @@
 
     function buildCommand() {
         if (!state.selectedUrl) return '';
-        const item = state.sniffedUrls.find(function (x) { return x.url === state.selectedUrl; });
+        const item = state.sniffedUrls.find(x => x.url === state.selectedUrl);
         const type = item ? item.type : 'm3u8';
-        const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
         const ref = state.referer || location.href;
         const baseName = safeName(state.fileName || 'clip');
         const dirPath = '/sdcard/Download/' + baseName;
 
-        // MP4：无时间拆分，整段下载（与短视频完整同格式）
+        // MP4：无时间拆分，整段下载
         if (type === 'mp4') {
             const parts = [
                 'curl -L "' + state.selectedUrl + '"',
-                '-H "User-Agent: ' + ua + '"',
+                '-H "User-Agent: ' + UA_ANDROID + '"',
                 '-H "Referer: ' + ref + '"',
-                '--connect-timeout 15',
-                '--retry 3',
-                '--retry-delay 2',
-                '-o "' + dirPath + '/' + baseName + '.mp4"'
+                '--connect-timeout 15', '--retry 3', '--retry-delay 2',
+                '-o "' + dirPath + '/' + baseName + '.mp4"',
             ];
             return 'mkdir -p "' + dirPath + '"\n' + parts.join(' ');
         }
 
-        // M3U8/MPD：按时间段拆分，每段一条命令（与短视频完整同格式，仅新增 --custom-range）
+        // M3U8/MPD：按时间段拆分，每段一条命令
         const lines = ['mkdir -p "' + dirPath + '"'];
         const segs = state.segments.slice();
         if (segs.length === 0) segs.push({ start: '', end: '' });
         segs.forEach(function (seg, i) {
             const base = [
                 '~/test/N_m3u8DL-RE "' + state.selectedUrl + '"',
-                '-H "User-Agent: ' + ua + '"',
+                '-H "User-Agent: ' + UA_ANDROID + '"',
                 '-H "Referer: ' + ref + '"',
-                '--thread-count 8',
-                '--download-retry-count 5',
-                '--log-level info',
-                '--auto-select',
+                '--thread-count 8', '--download-retry-count 5',
+                '--log-level info', '--auto-select',
                 '--save-dir "' + dirPath + '"',
             ];
             const s = toHMS(seg.start);
@@ -283,6 +297,8 @@
         });
         return lines.join('\n');
     }
+
+    // ========== 剪贴板 / 下载 ==========
 
     function copyToClipboard(text) {
         return new Promise((resolve) => {
@@ -305,12 +321,8 @@
         ta.style.opacity = '0';
         document.body.appendChild(ta);
         ta.select();
-        try {
-            document.execCommand('copy');
-            resolve(true);
-        } catch (e) {
-            resolve(false);
-        }
+        try { document.execCommand('copy'); resolve(true); }
+        catch (e) { resolve(false); }
         ta.remove();
     }
 
@@ -318,9 +330,7 @@
         if (isIOS) {
             const url = 'data:text/plain;charset=utf-8,' + encodeURIComponent(content);
             const w = window.open(url, '_blank');
-            if (!w) {
-                location.href = url;
-            }
+            if (!w) location.href = url;
             showToast('iOS: 长按文本 → 存储到文件');
             return;
         }
@@ -335,11 +345,11 @@
             a.remove();
             setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         } catch (e) {
-            copyToClipboard(content).then(() => {
-                showToast('下载失败，已复制到剪贴板');
-            });
+            copyToClipboard(content).then(() => showToast('下载失败，已复制到剪贴板'));
         }
     }
+
+    // ========== UI / Shadow DOM ==========
 
     const C = CSS_CLASSES;
     const CSS = `
@@ -470,9 +480,7 @@
         if (window.visualViewport) {
             const update = () => {
                 const offset = window.innerHeight - window.visualViewport.height;
-                if (rootEl) {
-                    rootEl.style.bottom = `calc(3px + env(safe-area-inset-bottom) + ${Math.max(0, offset)}px)`;
-                }
+                if (rootEl) rootEl.style.bottom = `calc(3px + env(safe-area-inset-bottom) + ${Math.max(0, offset)}px)`;
             };
             window.visualViewport.addEventListener('resize', update);
             window.visualViewport.addEventListener('scroll', update);
@@ -494,9 +502,7 @@
 
     function switchTab(idx) {
         state.currentTab = idx;
-        rootEl.querySelectorAll('.' + C.tabBtn).forEach((b, i) => {
-            b.classList.toggle(C.tabBtnActive, i === idx);
-        });
+        rootEl.querySelectorAll('.' + C.tabBtn).forEach((b, i) => b.classList.toggle(C.tabBtnActive, i === idx));
         renderTab();
     }
 
@@ -511,19 +517,9 @@
         statusEl.textContent = `共 ${state.sniffedUrls.length} 个 | 嗅探中...`;
     }
 
-    function getSnifferListEl() {
-        return contentEl.querySelector('.' + C.list);
-    }
-
-    function getEmptyStateEl() {
-        return contentEl.querySelector('.' + C.empty);
-    }
-
     function renderTab1() {
         const items = state.sniffedUrls;
-        let ul = getSnifferListEl();
-        const empty = getEmptyStateEl();
-
+        let ul = contentEl.querySelector('.' + C.list);
         if (!ul) {
             let html = `
                 <div class="${C.manualRow}">
@@ -531,20 +527,13 @@
                 </div>
                 <div class="${C.divider}"></div>
             `;
-            if (items.length === 0) {
-                html += `<div class="${C.empty}">等待嗅探视频资源 (m3u8/mp4)...</div>`;
-            } else {
-                html += `<ul class="${C.list}"></ul>`;
-            }
+            if (items.length === 0) html += `<div class="${C.empty}">等待嗅探视频资源 (m3u8/mp4)...</div>`;
+            else html += `<ul class="${C.list}"></ul>`;
             contentEl.innerHTML = html;
-
             if (items.length > 0) {
                 ul = contentEl.querySelector('.' + C.list);
-                items.forEach((item, i) => {
-                    ul.appendChild(createSnifferItem(item, i));
-                });
+                items.forEach((item, i) => ul.appendChild(createSnifferItem(item, i)));
             }
-
             bindTab1Events();
         } else {
             updateAllSelectedClasses();
@@ -582,12 +571,9 @@
             <button class="${C.itemDl}" title="直接下载">⬇</button>
             <button class="${C.itemCopy}" title="复制链接">复制</button>
         `;
-        const copyBtn = li.querySelector('.' + C.itemCopy);
-        copyBtn.addEventListener('click', (e) => {
+        li.querySelector('.' + C.itemCopy).addEventListener('click', (e) => {
             e.stopPropagation();
-            copyToClipboard(url).then(ok => {
-                showToast(ok ? '链接已复制' : '复制失败');
-            });
+            copyToClipboard(url).then(ok => showToast(ok ? '链接已复制' : '复制失败'));
         });
         li.querySelector('.' + C.itemDl).addEventListener('click', (e) => {
             e.stopPropagation();
@@ -604,13 +590,9 @@
 
     function appendSniffedItem() {
         if (state.currentTab !== 0) return;
-        const ul = getSnifferListEl();
-        if (!ul) {
-            renderTab1();
-            renderStatus();
-            return;
-        }
-        const empty = getEmptyStateEl();
+        const ul = contentEl.querySelector('.' + C.list);
+        if (!ul) { renderTab1(); renderStatus(); return; }
+        const empty = contentEl.querySelector('.' + C.empty);
         if (empty) empty.remove();
         const last = state.sniffedUrls[state.sniffedUrls.length - 1];
         ul.appendChild(createSnifferItem(last, state.sniffedUrls.length - 1));
@@ -618,7 +600,7 @@
     }
 
     function updateAllSelectedClasses() {
-        const ul = getSnifferListEl();
+        const ul = contentEl.querySelector('.' + C.list);
         if (!ul) return;
         ul.querySelectorAll('.' + C.item).forEach(li => {
             const url = li.dataset.url;
@@ -632,9 +614,7 @@
                     s.textContent = '✓';
                     li.appendChild(s);
                 }
-            } else {
-                if (check) check.remove();
-            }
+            } else { if (check) check.remove(); }
         });
     }
 
@@ -649,16 +629,14 @@
                     state.segments = [];
                     if (!state.fileName) state.fileName = safeName(document.title);
                     switchTab(1);
-                } else {
-                    showToast('无法识别的链接格式');
-                }
+                } else { showToast('无法识别的链接格式'); }
             }
         });
     }
 
     function getSelectedType() {
         if (!state.selectedUrl) return null;
-        const item = state.sniffedUrls.find(function (x) { return x.url === state.selectedUrl; });
+        const item = state.sniffedUrls.find(x => x.url === state.selectedUrl);
         return item ? item.type : detectType(state.selectedUrl, '');
     }
 
@@ -667,12 +645,10 @@
             contentEl.innerHTML = `<div class="${C.warn}">⚠️ 请先在嗅探 tab 选择一个视频</div>`;
             return;
         }
-
         const type = getSelectedType();
         const typeLabel = type === 'mp4' ? 'MP4' : 'M3U8';
         const urlName = escapeHtml((state.selectedUrl.split('/').pop().split('?')[0]) || state.selectedUrl);
         const isM3U8 = type !== 'mp4';
-
         if (isM3U8 && state.segments.length === 0) state.segments = [{ start: '', end: '' }];
 
         let timeBlock = '';
@@ -707,12 +683,10 @@
         fn.style.height = Math.min(fn.scrollHeight, 80) + 'px';
 
         const addBtn = contentEl.querySelector('#add-seg');
-        if (addBtn) {
-            addBtn.addEventListener('click', () => {
-                state.segments.push({ start: '', end: '' });
-                renderSegmentList();
-            });
-        }
+        if (addBtn) addBtn.addEventListener('click', () => {
+            state.segments.push({ start: '', end: '' });
+            renderSegmentList();
+        });
 
         contentEl.querySelector('.' + C.picked).addEventListener('click', () => switchTab(0));
     }
@@ -740,16 +714,14 @@
                 <input class="${C.timeInput}" inputmode="numeric" maxlength="6" placeholder="结束" value="${escapeHtml(seg.end)}">
                 <button class="${C.itemCopy}" type="button" title="删除">✕</button>
             `;
-            const nodes = row.querySelectorAll('input');
-            const del = row.querySelector('button');
-            nodes.forEach((inp, k) => {
+            row.querySelectorAll('input').forEach((inp, k) => {
                 inp.addEventListener('input', () => {
                     inp.value = inp.value.replace(/\D/g, '').slice(0, 6);
                     if (k === 0) state.segments[i].start = inp.value;
                     else state.segments[i].end = inp.value;
                 });
             });
-            del.addEventListener('click', () => {
+            row.querySelector('button').addEventListener('click', () => {
                 state.segments.splice(i, 1);
                 if (state.segments.length === 0) state.segments = [{ start: '', end: '' }];
                 renderSegmentList();
@@ -763,26 +735,22 @@
             contentEl.innerHTML = `<div class="${C.warn}">⚠️ 请先在嗅探 tab 选择一个视频</div>`;
             return;
         }
-
         const type = getSelectedType();
         const typeLabel = type === 'mp4' ? 'MP4 (curl)' : 'M3U8 (N_m3u8DL-RE)';
         const urlName = escapeHtml((state.selectedUrl.split('/').pop().split('?')[0]) || state.selectedUrl);
         const isM3U8 = type !== 'mp4';
-
-        let timeLine = '';
-        if (isM3U8) {
-            const n = state.segments.length;
-            timeLine = `<div class="${C.sumLine}">⏱ 时间段: ${n || 1} 段</div>`;
-        }
-
-        const fname = escapeHtml(state.fileName || '(未命名)');
+        const n = state.segments.length;
+        const timeLine = isM3U8 ? `<div class="${C.sumLine}">⏱ 时间段: ${n || 1} 段</div>` : '';
+        const fresh = buildCommand();
+        const cmdCount = fresh.split('\n').filter(l => l.trim()).length;
 
         contentEl.innerHTML = `
             <div class="${C.summary}">
                 <div class="${C.sumLink}">📌 ${urlName}</div>
                 <div class="${C.sumLine}">🔧 工具: ${typeLabel}</div>
                 ${timeLine}
-                <div class="${C.sumLine}">📄 文件名: ${fname}</div>
+                <div class="${C.sumLine}">🧵 命令条数: ${cmdCount}</div>
+                <div class="${C.sumLine}">📄 文件名: ${escapeHtml(state.fileName || '(未命名)')}</div>
             </div>
             <div class="${C.prevTitle}">▶ 命令预览（可编辑）</div>
             <textarea class="${C.cmdBox}"></textarea>
@@ -793,24 +761,14 @@
         `;
 
         const tb = contentEl.querySelector('.' + C.cmdBox);
-        const fresh = buildCommand();
-        if (state.customCommand && state.lastBuilt === fresh) {
-            tb.value = state.customCommand;
-        } else {
-            tb.value = fresh;
-            state.customCommand = null;
-            state.lastBuilt = fresh;
-        }
+        if (state.customCommand && state.lastBuilt === fresh) tb.value = state.customCommand;
+        else { tb.value = fresh; state.customCommand = null; state.lastBuilt = fresh; }
 
-        tb.addEventListener('input', () => {
-            state.customCommand = tb.value;
-        });
+        tb.addEventListener('input', () => { state.customCommand = tb.value; });
 
         contentEl.querySelector('#copy-btn').addEventListener('click', () => {
             const txt = state.customCommand || fresh;
-            copyToClipboard(txt).then(ok => {
-                showToast(ok ? '已复制到剪贴板' : '复制失败');
-            });
+            copyToClipboard(txt).then(ok => showToast(ok ? '已复制到剪贴板' : '复制失败'));
         });
 
         contentEl.querySelector('#download-btn').addEventListener('click', () => {
@@ -819,7 +777,12 @@
         });
     }
 
+    // ========== 启动 ==========
+
     function run() {
+        if (_initialized) return;   // 防止 interval / observer 重复触发 run
+        _initialized = true;
+
         state.fileName = safeName(document.title);
         startSniffer();
 
@@ -840,11 +803,8 @@
         setInterval(() => {
             const host = document.getElementById(_hostId);
             if (!host || !host.isConnected || !shadowRoot) {
-                shadowRoot = null;
-                rootEl = null;
-                contentEl = null;
-                statusEl = null;
-                restoreBtnEl = null;
+                shadowRoot = null; rootEl = null; contentEl = null;
+                statusEl = null; restoreBtnEl = null;
                 initPanel();
             }
         }, 2000);
@@ -863,6 +823,12 @@
             if (tryRun()) ob.disconnect();
         });
         ob.observe(document.documentElement, { childList: true, subtree: true });
-        setInterval(() => { tryRun(); }, 1500);
+        // 兜底 interval —— 成功 run 后必须停止，否则永不清理（原代码漏掉清理）
+        _tryRunIntervalId = setInterval(() => {
+            if (tryRun()) {
+                if (_tryRunIntervalId) clearInterval(_tryRunIntervalId);
+                _tryRunIntervalId = null;
+            }
+        }, 1500);
     }
 })();
