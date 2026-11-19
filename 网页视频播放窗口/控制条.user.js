@@ -54,6 +54,7 @@
   let forwardHoldActive = false;
   let forwardHoldTimer = null;
   let forwardOriginRate = 1;
+  let forwardButton = null;
 
   // getMainVideo 节流缓存
   let mainVideoCache = null;
